@@ -1254,7 +1254,7 @@ def test_a_knob_the_re_aim_finds_nudged_is_gripped_where_it_is_and_one_far_off_i
         assert "RE-AIMED from the look pose" in capsys.readouterr().out
     else:
         assert code == 1 and rec.events[-1] == "home" and note["outcome"] == "home" and len(asked) == 1
-        assert "mm from where the first grip went — the box moved" in capsys.readouterr().out
+        assert "mm from where the box was last seen from the look pose — the box moved" in capsys.readouterr().out
 
 
 def test_a_re_aim_with_no_way_down_to_the_knob_sends_the_arm_home_from_the_look_pose(
@@ -1483,11 +1483,424 @@ def test_a_lid_that_slipped_on_the_way_is_released_the_arm_goes_home_and_the_run
     )
 
 
-def test_a_box_the_press_moved_is_not_gripped(ctx, monkeypatch, tmp_path, capsys):
-    moved = (BUTTON[0] + 0.02, BUTTON[1], BUTTON[2] + 0.009)
-    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (moved, 9.0)])
-    assert code == 1 and rec.events[-2:] == ["aim:reach-after", "home"]
-    assert "STOP: the press MOVED the box 20 mm" in capsys.readouterr().out
+# ---- a box the press moved, followed ----------------------------------------------------------------------
+
+
+def _slid(dx, dy, knob_mm):
+    """The aim's press point on the box slid (dx, dy), its lid where the first aim's (BUTTON, 0.4) was."""
+    return (BUTTON[0] + dx, BUTTON[1] + dy, BUTTON[2] - 0.0004 + knob_mm / 1000)
+
+
+def _poses_at_looks(monkeypatch):
+    """ctx.cpose and ctx.held_xy as each knob_look found them, in order."""
+    real, seen = rlo.knob_look, []
+
+    def look(node, ctx_, *rest):
+        seen.append((ctx_.cpose, getattr(ctx_, "held_xy", None)))
+        return real(node, ctx_, *rest)
+
+    monkeypatch.setattr(rlo, "knob_look", look)
+    return seen
+
+
+def _moved_pose(c, m):
+    return (c.xyz[0] + m[0], c.xyz[1] + m[1], c.xyz[2])
+
+
+def test_a_box_slid_within_the_dead_band_changes_nothing_and_takes_no_second_reading(ctx, monkeypatch, tmp_path):
+    """The look reads the button 12 mm from the first aim (the readings scatter, and grips have taken that):
+    no confirming aim, the box where it was, the grip at the aim, as before."""
+    asked = _grip_ways(monkeypatch)
+    looks = _poses_at_looks(monkeypatch)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (_slid(0.012, 0.0, 9.0), 9.0)])
+    assert code == 0 and "aim:reach-confirm" not in rec.events
+    assert asked[0][0] == pytest.approx(BUTTON)
+    ((before, held),) = looks
+    assert ctx.cpose.xyz == before.xyz and ctx.held_xy == held
+    (knob,) = (r for r in rows if r["leg"] == "reach_knob")
+    assert knob["move_mm"] == pytest.approx([12.0, 0.0]) and knob["shift_mm"] == pytest.approx(12.0)
+    assert (knob["confirm_mm"], knob["confirmed"], knob["followed"]) == (None, None, False)
+
+
+def test_a_box_the_press_slid_30_mm_is_confirmed_and_followed_and_its_lid_comes_off_where_it_is(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """Run 1 on RAMMP 1.5 (2026-11-20 17:07): the box slid in the press and the run stopped, "the press
+    MOVED the box". The wrist's two readings from the look pose agreeing (1 mm apart), the run follows the
+    box: the grip goes by the aim moved by the confirmed move, and the box — every world, the no-land rings
+    round where the press held the button, the lid's spot — moves by it in x and y, its height and yaw kept.
+    The room judged for the box where it was is not used: the lid's spot is judged for it where it is. What
+    the scene camera saw before the press stays where it was: its cloud is the same before and after the
+    follow (moved by its error at the box only), though the map is made round the box where it is now."""
+    asked = _grip_ways(monkeypatch)
+    looks = _poses_at_looks(monkeypatch)
+    maps, clouds, real_map, real_cloud = [], [], rlo.spot_map, rlo._scene_cloud
+
+    def spot_map(ctx_, *a, **k):
+        maps.append(ctx_.cpose.xyz)  # the box the map is made round
+        return real_map(ctx_, *a, **k)
+
+    def scene_cloud(ctx_, fix, *a, **k):
+        got = real_cloud(ctx_, fix, *a, **k)
+        clouds.append((id(fix), ctx_.cpose.xyz, None if got is None else np.array(got[0])))
+        return got
+
+    monkeypatch.setattr(rlo, "spot_map", spot_map)
+    monkeypatch.setattr(rlo, "_scene_cloud", scene_cloud)
+    first, again = _slid(0.030, 0.0, 9.0), _slid(0.031, 0.0, 9.0)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (first, 9.0), (again, 9.0)])
+    assert code == 0, capsys.readouterr().out[-2000:]
+    after = rec.events.index("aim:reach-after")
+    assert rec.events[after : after + 2] == ["aim:reach-after", "aim:reach-confirm"]
+    # the confirming aim asks for the regrip's agreeing hits, its prior the look's reading, its lid height
+    # where the box was last seen (the look's own), not the reading's top
+    assert [h for tag, h in rec.aim_hits if tag == "reach-confirm"] == [rlo.REGRIP_AIM_HITS]
+    (look,) = (a for a in rec.aims if a[0] == "reach-after")
+    (confirm,) = (a for a in rec.aims if a[0] == "reach-confirm")
+    assert confirm[2] == pytest.approx(first[:2])
+    assert confirm[1] == pytest.approx(look[1]) and confirm[1] != pytest.approx(first[2])
+    m = (again[0] - BUTTON[0], again[1] - BUTTON[1])
+    ((grip_at, _lid, _tilt),) = asked
+    assert grip_at[:2] == pytest.approx(again[:2]) and grip_at[2] == pytest.approx(BUTTON[2])
+    ((before, held),) = looks
+    # the scene camera's own cloud, taken with the box where the wrist put it (the room's, before the
+    # follow) and where it slid to (the spot's, after): the same points
+    fix = clouds[-1][0]
+    was = [p for f, at, p in clouds if f == fix and at == pytest.approx(before.xyz)]
+    now = [p for f, at, p in clouds if f == fix and at == pytest.approx(ctx.cpose.xyz)]
+    assert was and now and was[-1] is not None
+    assert now[-1] == pytest.approx(was[-1])
+    assert ctx.cpose.xyz == pytest.approx(_moved_pose(before, m)) and ctx.cpose.yaw == before.yaw
+    assert ctx.held_xy == pytest.approx((held[0] + m[0], held[1] + m[1]))
+    (knob,) = (r for r in rows if r["leg"] == "reach_knob")
+    assert knob["move_mm"] == pytest.approx([30.0, 0.0]) and knob["confirm_mm"] == pytest.approx([31.0, 0.0])
+    assert (knob["confirmed"], knob["followed"], knob["stop"]) == (True, True, None)
+    # the room judged ahead was for the box where it was: the spot is judged on a map made for where it is
+    (spot,) = (r for r in rows if r["leg"] == "lid_spot")
+    assert spot["room_s"] is None
+    assert maps[0] == pytest.approx(before.xyz) and maps[-1] == pytest.approx(ctx.cpose.xyz)
+    out = capsys.readouterr().out
+    assert "FOLLOWING THE BOX: after press 1 the wrist's two readings from the look pose put it 31 mm" in out
+    assert "[+31, +0] mm in the arm's x and y" in out and "STOP" not in out
+
+
+@pytest.mark.parametrize("again_mm", [0, 20], ids=["it stays", "it slides again"])
+def test_a_flush_knob_on_a_box_that_slid_is_pressed_once_more_where_the_box_is_now(
+    ctx, monkeypatch, tmp_path, again_mm
+):
+    """The box slid 30 mm, the knob still flush: the press once more is solved onto the button moved by the
+    confirmed move. The look after it is judged against the confirmed reading, not the first aim: where the
+    box stayed it reads a move of 0 and goes on to the grip, no second confirm; where the second press slid
+    it 20 mm more, that move — from its own baseline, not 50 from the first aim — is confirmed and followed."""
+    solved, real = [], rp.solve_way_in
+
+    def solve_way_in(ctx_, cfg_, b, *a, **k):
+        solved.append(tuple(b))
+        return real(ctx_, cfg_, b, *a, **k)
+
+    monkeypatch.setattr(rp, "solve_way_in", solve_way_in)
+    asked = _grip_ways(monkeypatch)
+    looks = _poses_at_looks(monkeypatch)
+    slid = _slid(0.030, 0.0, 1.5)
+    up = _slid(0.030 + again_mm / 1000, 0.0, 9.0)
+    aims = [(BUTTON, 0.4), (_slid(0.030, 0.0, 2.0), 2.0), (slid, 1.5), (slid, 1.5), (up, 9.0)]
+    if again_mm:
+        aims.append((up, 9.0))
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims)
+    assert code == 0 and rec.events.count("depth:press") == 2
+    assert rec.events.count("aim:reach-confirm") == (2 if again_mm else 1)
+    assert solved[-1][:2] == pytest.approx(slid[:2]) and solved[-1][2] == pytest.approx(solved[0][2])
+    knobs = [r for r in rows if r["leg"] == "reach_knob"]
+    assert [k["followed"] for k in knobs] == [True, bool(again_mm)]
+    assert knobs[1]["shift_mm"] == pytest.approx(again_mm, abs=1e-6)
+    assert asked[0][0][:2] == pytest.approx(up[:2])
+    (first, _h1), (second, _h2) = looks
+    total = (up[0] - BUTTON[0], up[1] - BUTTON[1])
+    assert ctx.cpose.xyz == pytest.approx(_moved_pose(first, total))
+    assert second.xyz == pytest.approx(_moved_pose(first, (0.030, 0.0)))
+
+
+def _sighted(monkeypatch, sighted):
+    """fly_press_way_in flying today's way in, its first press's sight followed to `sighted` (x, y)."""
+    flown = []
+
+    def fly(ctx_, cfg, runner, way, legs, top_z, eyes=None, lookahead=None):
+        out = rp.fly_way_in(ctx_, runner, legs, way.stroke, top_z, lookahead=lookahead)
+        flown.append(1)
+        if len(flown) == 1:
+            way.sighted = sighted
+        return out
+
+    monkeypatch.setattr(rp, "fly_press_way_in", fly)
+
+
+def test_a_box_that_slid_after_a_followed_sight_is_gripped_at_the_confirmed_reading(ctx, monkeypatch, tmp_path):
+    """The first press's sight followed 12 mm out, then the box slid 30 mm in the press: the grip goes to the
+    wrist's confirmed reading, the button's height kept — the sight's correction of the aim is not carried
+    across the follow (the readings cannot tell a move before the sight from one after it)."""
+    sighted = (BUTTON[0] + 0.012, BUTTON[1] - 0.003)
+    _sighted(monkeypatch, sighted)
+    asked = _grip_ways(monkeypatch)
+    slid, again = _slid(0.030, 0.010, 9.0), _slid(0.031, 0.011, 9.0)
+    code, _rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (slid, 9.0), (again, 9.0)])
+    assert code == 0
+    ((grip_at, _lid, _tilt),) = asked
+    assert grip_at[:2] == pytest.approx(again[:2]) and grip_at[2] == pytest.approx(BUTTON[2])
+    (knob,) = (r for r in rows if r["leg"] == "reach_knob")
+    assert knob["followed"] is True and knob["confirm_mm"] == pytest.approx([31.0, 11.0])
+
+
+def test_a_sighted_press_on_a_box_inside_the_dead_band_is_gripped_at_the_sighted_place(ctx, monkeypatch, tmp_path):
+    """The sight followed 12 mm out and the look reads the box 8 mm from the first aim: nothing is followed,
+    and the grip goes where the sight saw the button."""
+    sighted = (BUTTON[0] + 0.012, BUTTON[1] - 0.003)
+    _sighted(monkeypatch, sighted)
+    asked = _grip_ways(monkeypatch)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (_slid(0.008, 0.0, 9.0), 9.0)])
+    assert code == 0 and "aim:reach-confirm" not in rec.events
+    ((grip_at, _lid, _tilt),) = asked
+    assert grip_at[:2] == pytest.approx(sighted)
+    (knob,) = (r for r in rows if r["leg"] == "reach_knob")
+    assert knob["followed"] is False
+
+
+@pytest.mark.parametrize(
+    "confirm, said",
+    [
+        (
+            None,
+            "the press MOVED the box 30 mm ([+30, +0] mm), and the wrist's second reading after it finds no "
+            "button (no circle) — the box may still be moving",
+        ),
+        (
+            _slid(0.048, 0.0, 9.0),
+            "the press MOVED the box, but the wrist's two readings of the button after it do not agree: "
+            "[+30, +0] mm, then [+48, +0] mm from where it was seen, 18 mm apart (more than 15) — the box may "
+            "still be moving",
+        ),
+    ],
+    ids=["finds none", "18 mm apart"],
+)
+def test_a_slid_box_the_second_reading_does_not_confirm_stops_the_run_with_both_readings(
+    ctx, monkeypatch, tmp_path, capsys, confirm, said
+):
+    """The second aim finds no button, or one 18 mm from the first reading (more than depth_press.SLIDE_OK_M,
+    the same place as far as a grip is concerned): the box may still be moving — STOP, home from the look
+    pose, nothing gripped, the readings in the reason (which the node reads as box_moved)."""
+    looks = _poses_at_looks(monkeypatch)
+    aims = [(BUTTON, 0.4), (_slid(0.030, 0.0, 9.0), 9.0), None if confirm is None else (confirm, 9.0)]
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims)
+    assert code == 1 and rec.events[-3:] == ["aim:reach-after", "aim:reach-confirm", "home"]
+    assert not any(e.startswith("grip:") for e in rec.events)
+    (knob,) = (r for r in rows if r["leg"] == "reach_knob")
+    assert knob["stop"].startswith(said) and (knob["confirmed"], knob["followed"]) == (False, False)
+    ((before, _held),) = looks
+    assert ctx.cpose.xyz == before.xyz  # nothing followed
+    assert ("STOP: " + said) in capsys.readouterr().out
+
+
+def test_a_confirmed_move_past_the_regrip_limit_stops_the_run_naming_the_distance_and_the_limit(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The limit is judged on the confirmed move, printed to a tenth (a stop at 40.1 mm does not read
+    "40 mm, farther than the 40 mm")."""
+    far = _slid(0.0451, 0.0, 9.0)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (far, 9.0), (far, 9.0)])
+    assert code == 1 and rec.events[-3:] == ["aim:reach-after", "aim:reach-confirm", "home"]
+    (knob,) = (r for r in rows if r["leg"] == "reach_knob")
+    assert (knob["confirmed"], knob["followed"]) == (True, False)
+    assert rlo.REGRIP_MAX_M == 0.040
+    assert (
+        "STOP: the press MOVED the box 45.1 mm, farther than the 40 mm a moved box is followed — check it is "
+        "still standing on the table" in capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize("look_mm, confirm_mm", [(38, 43), (43, 38)], ids=["confirm past", "confirm within"])
+def test_the_regrip_limit_is_judged_on_the_confirmed_move_not_the_looks_reading(
+    ctx, monkeypatch, tmp_path, capsys, look_mm, confirm_mm
+):
+    """The look reads 38 mm and the confirm 43: STOP on the limit, 43.0 mm. The look reads 43 and the confirm
+    38: the box is followed by 38, the confirm's."""
+    asked = _grip_ways(monkeypatch)
+    looks = _poses_at_looks(monkeypatch)
+    first, again = _slid(look_mm / 1000, 0.0, 9.0), _slid(confirm_mm / 1000, 0.0, 9.0)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (first, 9.0), (again, 9.0)])
+    (knob,) = (r for r in rows if r["leg"] == "reach_knob")
+    ((before, _held),) = looks
+    if confirm_mm > 40:
+        assert code == 1 and knob["followed"] is False and not asked
+        assert "STOP: the press MOVED the box 43.0 mm, farther than the 40 mm" in capsys.readouterr().out
+        assert ctx.cpose.xyz == before.xyz
+    else:
+        assert code == 0 and knob["followed"] is True
+        assert asked[0][0][:2] == pytest.approx(again[:2])
+        assert ctx.cpose.xyz == pytest.approx(_moved_pose(before, (0.038, 0.0)))
+
+
+def test_a_box_that_slid_and_whose_lid_dropped_is_confirmed_then_stops_as_a_moved_box(ctx, monkeypatch, tmp_path):
+    """The button 30 mm off and the lid read 12 mm lower: the reading is confirmed first; the confirmed move
+    past the dead band and the lid BOX_LIFTED_M off stops the run on "the press MOVED the box ..., and its
+    lid", which the node classes box_moved as it did any slide before the follow — not the lower-case lid
+    stop, nothing followed."""
+    looks = _poses_at_looks(monkeypatch)
+    low = (BUTTON[0] + 0.030, BUTTON[1], BUTTON[2] - 0.0004 - 0.012 + 0.0009)
+    aims = [(BUTTON, 0.4), (low, 0.9), (low, 0.9), (low, 0.9)]
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims)
+    assert code == 1 and rec.events[-3:] == ["aim:reach-after", "aim:reach-confirm", "home"]
+    assert not any(e.startswith("grip:") for e in rec.events)
+    (knob,) = (r for r in rows if r["leg"] == "reach_knob")
+    assert knob["stop"].startswith("the press MOVED the box 30 mm, and its lid -12 mm") and knob["followed"] is False
+    ((before, _held),) = looks
+    assert ctx.cpose.xyz == before.xyz
+
+
+def test_a_look_past_the_dead_band_whose_confirm_comes_back_within_it_follows_nothing(ctx, monkeypatch, tmp_path):
+    """The look reads 18 mm (a scattered reading), the confirm 8: the box stayed — no follow, no stop, the
+    grip where it always went, the verdicts judged on the confirmed 8 mm."""
+    asked = _grip_ways(monkeypatch)
+    looks = _poses_at_looks(monkeypatch)
+    aims = [(BUTTON, 0.4), (_slid(0.018, 0.0, 9.0), 9.0), (_slid(0.008, 0.0, 9.0), 9.0)]
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims)
+    assert code == 0 and rec.events.count("aim:reach-confirm") == 1
+    assert asked[0][0] == pytest.approx(BUTTON)
+    ((before, held),) = looks
+    assert ctx.cpose.xyz == before.xyz and ctx.held_xy == held
+    (knob,) = (r for r in rows if r["leg"] == "reach_knob")
+    assert (knob["confirmed"], knob["followed"], knob["stop"]) == (True, False, None)
+    assert knob["shift_mm"] == pytest.approx(8.0)
+
+
+def test_a_scattered_look_on_a_released_lid_with_a_flush_knob_stops_as_for_a_box_that_stayed(
+    ctx, monkeypatch, tmp_path
+):
+    """The box stayed; the look's first reading scattered 17 mm, the lid read 6 mm up, the knob flush; the
+    confirm reads 3 mm. Judged on the confirmed move, the lid rose with the knob not up: the run stops
+    (a released lid is not pressed again), as it did before the follow."""
+    risen = (BUTTON[0] + 0.017, BUTTON[1], BUTTON[2] - 0.0004 + 0.006 + 0.0009)
+    flush = (BUTTON[0] + 0.003, BUTTON[1], BUTTON[2] - 0.0004 + 0.006 + 0.0009)
+    aims = [(BUTTON, 0.4), (risen, 0.9), (risen, 0.9), (flush, 0.9)]
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims)
+    assert code == 1 and rec.events.count("depth:press") == 1 and "aim:reach-confirm" in rec.events
+    assert not any(e.startswith("grip:") for e in rec.events)
+    (knob,) = (r for r in rows if r["leg"] == "reach_knob")
+    assert "the lid rose +6 mm (released) but its knob is not up" in knob["stop"] and knob["followed"] is False
+
+
+@pytest.mark.parametrize("off_mm, rekeyed", [(25.0, True), (8.0, False)])
+def test_a_re_aim_after_a_grip_on_air_grips_at_the_knob_and_rekeys_a_box_moved_past_the_dead_band(
+    ctx, monkeypatch, tmp_path, off_mm, rekeyed
+):
+    """The re-aim after a close on air finds the knob `off_mm` from where the box was last seen: the second
+    grip goes there, as flown; 25 mm off, past depth_press.SLIDE_OK_M, the box is followed too (the lid's
+    set-down planned round it where it is), 8 mm off it is not."""
+    asked = _grip_ways(monkeypatch)
+    looks = _poses_at_looks(monkeypatch)
+    nudged = (BUTTON[0] + off_mm / 1000, BUTTON[1], BUTTON[2] + 0.009)
+    code, _rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0), (nudged, 9.0)], knuckle=[AIR, KNOB_ON]
+    )
+    assert code == 0
+    (_first, _l1, _t1), (second, _l2, _t2) = asked
+    assert second[:2] == pytest.approx(nudged[:2])
+    (note,) = (r for r in rows if r["leg"] == "reach_regrip")
+    assert note["shift_mm"] == pytest.approx(off_mm) and note["followed"] is rekeyed
+    ((before, _held),) = looks
+    want = _moved_pose(before, (off_mm / 1000, 0.0)) if rekeyed else before.xyz
+    assert ctx.cpose.xyz == pytest.approx(want)
+
+
+def test_a_re_aim_after_a_followed_sight_grips_at_the_re_aim(ctx, monkeypatch, tmp_path):
+    """The sight stood 12 mm from the aim and the first grip went there, on air; the re-aim reads the knob
+    2 mm from where the look pose last saw it: the second grip goes to the re-aim's own x and y (the
+    camera's own reading, not the sight's estimate moved), its stop judged on the 2 mm from where the box
+    was last seen, the box not re-keyed; the note's shift_mm is still from where the first grip went (10)."""
+    sighted = (BUTTON[0] + 0.012, BUTTON[1])
+    _sighted(monkeypatch, sighted)
+    asked = _grip_ways(monkeypatch)
+    reaim = (BUTTON[0] + 0.002, BUTTON[1], BUTTON[2] + 0.009)
+    code, _rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0), (reaim, 9.0)], knuckle=[AIR, KNOB_ON]
+    )
+    assert code == 0
+    (first, _l1, _t1), (second, _l2, _t2) = asked
+    assert first[:2] == pytest.approx(sighted)
+    assert second[:2] == pytest.approx(reaim[:2])
+    (note,) = (r for r in rows if r["leg"] == "reach_regrip")
+    assert note["shift_mm"] == pytest.approx(10.0) and note["move_mm"] == pytest.approx([2.0, 0.0])
+    assert note["followed"] is False
+
+
+def test_a_box_nudged_before_the_press_is_gripped_at_the_confirmed_reading_the_first_time(ctx, monkeypatch, tmp_path):
+    """The box stood 20 mm from the first aim before the press: the sight followed it there; the look then
+    reads the same 20 mm against the first aim and the confirm agrees. The readings cannot tell a move before
+    the sight from one after it; the follow puts the grip at the confirmed reading, not at the sighted button
+    moved again (40 mm from the aim, a pad on the knob's top): the first grip closes on the knob, and no
+    second is needed."""
+    sighted = (BUTTON[0] + 0.020, BUTTON[1])
+    _sighted(monkeypatch, sighted)
+    asked = _grip_ways(monkeypatch)
+    there = _slid(0.020, 0.0, 9.0)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (there, 9.0), (there, 9.0)])
+    assert code == 0 and rec.events.count("grip:close") == 1
+    ((first, _lid, _tilt),) = asked
+    assert first[:2] == pytest.approx(there[:2]) and first[2] == pytest.approx(BUTTON[2])
+    assert not [r for r in rows if r["leg"] == "reach_regrip"]
+
+
+@pytest.mark.parametrize("reaim_mm, grips", [(45, False), (-32, True)], ids=["45 from seen", "32 from seen"])
+def test_the_regrips_stop_is_judged_on_the_move_from_where_the_box_was_last_seen(
+    ctx, monkeypatch, tmp_path, capsys, reaim_mm, grips
+):
+    """After a followed sight 12 mm out, the first grip went 12 mm from where the look saw the box. The
+    re-aim's limit is judged reading against reading: one 45 mm out is 33 mm from the grip but 45 from where
+    the box was last seen — STOP. One 32 mm the other way is 44 mm from the grip but 32 from where it was
+    seen: gripped there, the box re-keyed by 32, within the limit."""
+    _sighted(monkeypatch, (BUTTON[0] + 0.012, BUTTON[1]))
+    asked = _grip_ways(monkeypatch)
+    looks = _poses_at_looks(monkeypatch)
+    reaim = (BUTTON[0] + reaim_mm / 1000, BUTTON[1], BUTTON[2] + 0.009)
+    code, _rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0), (reaim, 9.0)], knuckle=[AIR, KNOB_ON]
+    )
+    (note,) = (r for r in rows if r["leg"] == "reach_regrip")
+    assert note["shift_mm"] == pytest.approx(abs(reaim_mm - 12.0))  # from where the first grip went
+    assert note["move_mm"] == pytest.approx([float(reaim_mm), 0.0])
+    ((before, _held),) = looks
+    if grips:
+        assert code == 0 and len(asked) == 2 and asked[1][0][:2] == pytest.approx(reaim[:2])
+        assert note["followed"] is True
+        assert ctx.cpose.xyz == pytest.approx(_moved_pose(before, (reaim_mm / 1000, 0.0)))
+    else:
+        assert code == 1 and len(asked) == 1 and note["outcome"] == "home" and note["followed"] is False
+        out = capsys.readouterr().out
+        assert "sees the button 45 mm from where the box was last seen from the look pose — the box moved" in out
+        assert ctx.cpose.xyz == before.xyz
+
+
+def test_following_moves_the_box_and_what_is_keyed_to_it_in_x_and_y_only():
+    """follow_box: `seen` moved by the move in x and y, its height kept, and `at` that same reading at its
+    own height (a sight's correction in `at` is not carried across); ctx.cpose moved, its height and yaw
+    kept; ctx.held_xy moved where it is set; the home planned round the box where it was dropped."""
+    from box_opening.models.container import ContainerPose
+
+    ctx = SimpleNamespace(
+        cpose=ContainerPose(xyz=(0.60, -0.50, 0.28), yaw=0.3), held_xy=(0.61, -0.49), home_ahead=["home"]
+    )
+    m = (0.021, -0.013)
+    at, seen = rlo.follow_box(ctx, m, (0.70, -0.55, 0.40), (0.69, -0.56, 0.41), "x")
+    assert seen == pytest.approx((0.711, -0.573, 0.41)) and at == pytest.approx((0.711, -0.573, 0.40))
+    assert ctx.cpose.xyz == pytest.approx((0.621, -0.513, 0.28)) and ctx.cpose.yaw == 0.3
+    assert ctx.held_xy == pytest.approx((0.631, -0.503)) and ctx.home_ahead is None
+    # the scene camera's error at the box is what it was before the follows: their sum is kept on the pose
+    fix = SimpleNamespace(pose=ContainerPose(xyz=(0.59, -0.52, 0.28), yaw=0.3))
+    assert rlo.scene_error_xy(ctx, fix) == pytest.approx((0.01, 0.02))
+    rlo.follow_box(ctx, (-0.004, 0.009), at, seen, "x")
+    assert ctx.cpose.followed == pytest.approx((0.017, -0.004))
+    assert rlo.scene_error_xy(ctx, fix) == pytest.approx((0.01, 0.02))
+    bare = SimpleNamespace(cpose=ContainerPose(xyz=(0.6, -0.5, 0.28), yaw=0.0), held_xy=None, home_ahead=None)
+    rlo.follow_box(bare, m, (0.7, -0.5, 0.4), (0.7, -0.5, 0.4), "x")
+    assert bare.held_xy is None
 
 
 def test_a_button_the_wrist_no_longer_finds_after_the_press_is_gripped_for_not_pressed_again(
@@ -1621,7 +2034,8 @@ def test_a_knob_whose_height_no_look_reads_before_the_press_is_not_pressed(ctx, 
 
 # ---- home, planned from the look pose while the way back flies -----------------
 
-MOVED = (BUTTON[0] + 0.02, BUTTON[1], BUTTON[2] + 0.009)  # the aim after a press that moved the box 20 mm
+# the aim after a press that moved the box 20 mm (the confirming aim, with no aim left, finds none: a stop)
+MOVED = (BUTTON[0] + 0.02, BUTTON[1], BUTTON[2] + 0.009)
 NOT_UP_TWICE = [(BUTTON, 0.4), (BUTTON, 2.0), (BUTTON, 1.5), (BUTTON, 2.8), (BUTTON, 2.5)]  # flush: under 3.0
 
 
@@ -2060,7 +2474,7 @@ def test_the_home_planned_on_the_way_back_flies_only_from_where_it_starts(
     monkeypatch.setattr(rlo, "knob_look", pushed)
     plans = _home_plans(monkeypatch)
     code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (MOVED, 9.0)])
-    assert code == 1 and rec.events[-2:] == ["aim:reach-after", "home"]
+    assert code == 1 and rec.events[-3:] == ["aim:reach-after", "aim:reach-confirm", "home"]
     (ahead,) = (r for r in rows if r["leg"] == "home_ahead")
     assert ahead["flown"] is flown and ahead["off_rad"] == pytest.approx(push)
     look = plans[0][0]  # where the way back ended

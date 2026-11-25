@@ -85,6 +85,42 @@ beside the container, and goes home. It has one action, `open_box`:
 1. **Grip:** straight from the press, the fingers rise, open, come down around
    the button and close on it. A grip that misses goes back to the look pose and
    tries again from there, a centimetre lower.
+   Back at the look pose after a press (the grip from the press missed, or the
+   press was not felt), the wrist aims at the button again and compares the
+   reading with where the box was last seen from that pose: two readings from
+   one pose by one method, so the wrist mount's error and its depth bias cancel
+   and the difference is how far the box moved. A button read more than
+   15 mm from where it was is aimed at once more from the same pose before
+   anything is judged on it; the second reading must find the button and
+   stand within 15 mm of the first (the same place as far as a grip is
+   concerned), else the run ends `box_moved` with both readings in the reason
+   (the box may still be moving). The move judged from then on is the second
+   reading's. Within 15 mm, nothing changes from before: a lid read more than
+   8 mm higher or lower than before the press, and not a released lid, ends
+   the run (`failed`, as it did before); a released lid with its knob flush
+   ends it too. Past 15 mm the box slid: its lid read more than 8 mm off
+   ends the run `box_moved`, as does a move past 40 mm (the distance and the
+   limit in the reason); otherwise the run follows it. The grip and a press
+   once more go to the confirmed reading itself (the button's height kept),
+   even after a sight: the readings cannot tell a box moved before the
+   sight from one moved after it, and carrying the sight's correction across
+   would put the grip more than 15 mm past the knob in the first case, a pad
+   on the knob's top; the reading is off only by the camera's own bias in
+   both. A press once more sights again. The lid's spot, the no-land rings
+   round the box and the room judged for the lid go by the box moved by
+   that much in x and y (its height and its turn kept); the scene camera's
+   picture of the table, taken before the press, stays where it was. The
+   look after a press once more is judged against the confirmed reading. The run says so on the console
+   (`FOLLOWING THE BOX: ...`) and in the run log's `reach_knob` row
+   (`move_mm`, `confirm_mm`, `confirmed`, `followed`). A re-aim after a grip
+   on air grips where it sees the knob and stops past 40 mm from where the
+   box was last seen from the look pose (without a sight, where the first
+   grip went, as before); where it sees the knob more than 15 mm from
+   where the box was last seen from the look pose, the box is followed as
+   well. Not followed: a box that slid and whose lid rose more than 8 mm (it
+   ends `box_moved` on its lid; a smaller rise is followed with no rise added
+   to the grip), a box that moved before the grip straight from
+   the press (no look precedes it), and a box that turned. Not flown.
 1. **Carry:** the lid is lifted, carried and set down beside the container in
    one motion, at a spot the cameras see is clear. Never inside the
    no-land radius: the lid's rim at least 50 mm off the container's (0.155 m
@@ -1278,13 +1314,15 @@ does not fly (near the edge of the arm's reach, a joint limit down the
 line), the pad ends are brought 0.75, 0.5 or 0.25 of the way from the aim to
 it, the first that flies, and the run says how much and why not the whole.
 The run then goes by the button where it was seen: a second press and the
-grip are solved onto it. The box is not moved: the lid's spot and the room
-round it stay keyed to the box where the cameras put it. A second press
+grip are solved onto it. The sight does not move the box: the lid's spot and the room
+round it stay keyed to the box where the cameras put it (a box the look after
+the press finds moved is followed, and from then on the grip goes by the
+wrist's confirmed reading, not by the sight: see "Grip" above). A second press
 sights again. Every way back to the look pose reverses what flew (the
 stroke, the level line, the turn down and the move to the stop) or, where
 the rise cannot go back up the stroke, walks there from its top; either way
 it ends at the look pose the aim was read at (the press-only way home and
-the stops over the box go home as before). The knob is judged against the first aim:
+the stops over the box go home as before). The knob is judged against the first aim (or the reading a follow moved it to):
 after a sight, from the pose that aim was read at, so that the wrist
 camera's mount and depth errors are those of the aim's own reading and
 cancel; without one, as before, from the re-aimed look pose the way in turned

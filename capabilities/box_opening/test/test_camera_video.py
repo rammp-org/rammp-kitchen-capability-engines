@@ -105,6 +105,36 @@ def test_the_lid_s_spot_is_drawn_where_the_scene_camera_sees_that_place():
     assert not marks
 
 
+def test_the_lid_s_spot_drawn_after_a_followed_slide_is_where_it_was_drawn_before_it():
+    """The box slid 30 mm and the run followed it (follow_box): the scene camera's error at the box is what
+    it was before the slide, so the rim drawn for the same spot is the rim drawn before the follow — not
+    moved back by the slide, which the scene camera never saw."""
+    marks = {}
+    video = SimpleNamespace(overlay=lambda name, uv, text: marks.update({name: (np.asarray(uv), text)}))
+    T = np.eye(4)
+    T[:3, :3] = np.diag([1.0, -1.0, -1.0])
+    T[:3, 3] = [0.5, 0.0, 1.0]
+    loc = SimpleNamespace(
+        base_to_color=lambda: T, grab=SimpleNamespace(k=np.array([[500.0, 0, 320], [0, 500, 240], [0, 0, 1]]))
+    )
+    ctx = SimpleNamespace(
+        lid_video=video,
+        scene_locator=loc,
+        model=SimpleNamespace(lid_dims=(0.10, 0.10, 0.03)),
+        cpose=ContainerPose(xyz=(0.70, 0.0, 0.0), yaw=0.0),
+        held_xy=None,
+        home_ahead=None,
+    )
+    fix = SimpleNamespace(pose=ContainerPose(xyz=(0.72, 0.0, 0.0), yaw=0.0))
+    drop = ContainerPose(xyz=(0.5, 0.0, 0.0), yaw=0.0)
+    rlo._video_spot(ctx, (None, None, fix, None), drop)
+    before = marks["scene"][0]
+    rlo.follow_box(ctx, (0.030, -0.010), (0.7, 0.0, 0.1), (0.7, 0.0, 0.1), "slid")
+    marks.clear()
+    rlo._video_spot(ctx, (None, None, fix, None), drop)
+    assert marks["scene"][0] == pytest.approx(before)
+
+
 def test_a_long_caption_shrinks_to_fit_the_picture_and_a_short_one_does_not(tmp_path):
     """Sweep startup_cpu-g-caption-fit: the one-motion captions needed 1 293
     and 1 296 px of the 1 280 and ran off the edge ('... 1.6 mm past the

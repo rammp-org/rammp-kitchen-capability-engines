@@ -20,6 +20,13 @@ after the press as before (reach_press._fly_way_in).
           edge 176-189 mm from the lens, inside the OAK's stereo minimum. From
           the look pose the button is at the frame's centre, 299 mm off, 29
           deg from the lens axis — the view the press was aimed from.
+          A button read more than depth_press.SLIDE_OK_M from where the box
+          was last seen is aimed at once more before anything is judged on
+          it; the two readings agreeing (within SLIDE_OK_M), the confirmed
+          move is the one judged: within SLIDE_OK_M everything as for a box
+          that stayed; past it, the box is followed there (follow_box) — up
+          to REGRIP_MAX_M, past which, its lid BOX_LIFTED_M off, or where
+          the readings disagree, STOP, home. Not flown.
   AGAIN   flush (below press_demo.KNOB_SHUT_BELOW_MM): the same press once
           more, its way in solved again from where the arm stands, and the
           look again. Still flush: STOP, home. Neither flush nor up: not
@@ -43,8 +50,8 @@ after the press as before (reach_press._fly_way_in).
           air (past the grip band's closed end) they open again and the hand
           backs out the way it came to the look pose, home planned while it
           does; there the wrist aims at the knob again, and where it finds
-          it no farther than a slid box is gripped (depth_press.SLIDE_OK_M),
-          the hand comes down to it once more (GRIP_TRIES). On air again,
+          it no farther than REGRIP_MAX_M from where the box was last seen
+          from there, the hand comes down to it once more (GRIP_TRIES). On air again,
           or no knob, or no way down to it: home.
   SPOT    where the lid goes, from the scene camera (owner 2026-10-29: "in
           parallel will pressing/opening the box so we can seemlesly grab
@@ -316,10 +323,15 @@ GRIP_SHOT_R_PX = (45, 95)
 # the grip goes where the first one went, the press's and the look's aim.
 GRIP_RETRY_LOWER_M = 0.010
 # ... and where it finds the knob, there, this far at most from where the
-# first grip went: fingers that closed over it can nudge the lid (10:40 and
+# box was last seen from the look pose (without a sight, where the first grip
+# went): fingers that closed over it can nudge the lid (10:40 and
 # 10:58 2026-10-30, the knob re-aimed 14 and 19 mm off once the aim no longer
 # took the lid's 60 mm ring for it, button_aim.TABLE_RECTIFY_M); farther is
-# the box moved, and the hand goes home
+# the box moved, and the hand goes home. The same limit bounds the box the look
+# after a press follows (knob_look, follow_box): a move the wrist's readings
+# from the look pose agree on is taken for the box slid on the table only this
+# far — none farther has been gripped or measured, and a box that went farther
+# may have turned or tipped, which a move in x and y does not follow
 REGRIP_MAX_M = 0.040
 # ... and found there on this many agreeing hits, not the reach-out's 2
 # (reach_press.REACH_AIM_HITS): a popped knob aims worse than a flush one —
@@ -1453,6 +1465,25 @@ def counter_map(ctx, watcher, scene_fix, scene_q, table_z, aim=False, more=()):
         return None
 
 
+@dataclass(frozen=True)
+class FollowedPose(ContainerPose):
+    """ctx.cpose after follow_box: the box where it slid to, and `followed`, the sum in x and y of the
+    follows that moved it there. Any other placing of the box is a ContainerPose and has none."""
+
+    followed: tuple = (0.0, 0.0)
+
+
+def scene_error_xy(ctx, scene_fix):
+    """The scene camera's error at the box in x and y: where the wrist put the box (ctx.cpose) less where
+    the scene camera did (`scene_fix`), as when the scene camera looked — the box's slides since then
+    (FollowedPose.followed) are not its error, and its cloud does not move with them."""
+    f = getattr(ctx.cpose, "followed", (0.0, 0.0))
+    return (
+        float(ctx.cpose.xyz[0]) - float(scene_fix.pose.xyz[0]) - float(f[0]),
+        float(ctx.cpose.xyz[1]) - float(scene_fix.pose.xyz[1]) - float(f[1]),
+    )
+
+
 def _scene_cloud(ctx, scene_fix, scene_q, table_z):
     """spot_map's scene camera cloud: (its table points moved by its error
     at the box, the arm when it looked left out; the table they were
@@ -1469,11 +1500,7 @@ def _scene_cloud(ctx, scene_fix, scene_q, table_z):
         # the scene camera's error at the box, taken out of all of it. A ROUGH fix (a box the frame
         # cut, scene_source.SCENE_ROUGH) is off by its own fit, not by the camera's error: the cloud
         # is kept as it was measured
-        pts = pts + [
-            float(ctx.cpose.xyz[0]) - float(scene_fix.pose.xyz[0]),
-            float(ctx.cpose.xyz[1]) - float(scene_fix.pose.xyz[1]),
-            0.0,
-        ]
+        pts = pts + [*scene_error_xy(ctx, scene_fix), 0.0]
     chain = approach._chain()
     if scene_q is not None and hasattr(chain, "points"):
         pts = _off_line(pts, chain.points(list(scene_q)), clear_table.ARM_CLEAR_M)
@@ -2242,15 +2269,18 @@ class KnobLook:
     """What the look after a press saw (knob_look). The grip needs the knob
     up (popped): the fingers close on it at its base. A lid that rose
     (lid_rose) is the box open, but with its knob flush it gives them
-    nothing to hold, and knob_look stops the run (`stop`, LID_POP_M)."""
+    nothing to hold, and knob_look stops the run (`stop`, LID_POP_M). A
+    box the press slid, the move confirmed: `move_xy`, which the run
+    follows (follow_box)."""
 
     found: bool
     up_mm: float = None  # the knob above its lid: the highest any look read
-    shift_m: float = None  # the button from where the press was aimed
+    shift_m: float = None  # the button from where the box was last seen (the first aim, or a followed reading)
     lid_dz_m: float = None  # the lid, by the wrist's own two readings
     status: str = ""
     stop: str = None  # why the run stops here: the box not found, or moved, or its lid released with the knob flush
     lid_rose: bool = False  # the lid rose LID_POP_M with the button where it was: released
+    move_xy: tuple = None  # the box's move in base x and y (m), confirmed: the run follows it; None, nothing moves
 
     @property
     def popped(self):
@@ -2269,18 +2299,32 @@ class KnobLook:
         return self.found and knob_call(self.up_mm) == "shut"
 
 
+def _move_xy(seen, again):
+    """`again` less `seen` in base x and y (m): how far, and which way, the box moved between two readings."""
+    return (float(again[0]) - float(seen[0]), float(again[1]) - float(seen[1]))
+
+
+def _mm_xy(m):
+    return "[%+.0f, %+.0f] mm" % (1000 * m[0], 1000 * m[1])
+
+
 def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
     """From the look pose after press number `press`: the oblique aim at
-    the aimed `button` (reach_press._aim, the knob's height above its own
-    lid), once more where it reads the knob down or finds no button
+    `button` — where the box was last seen from here: the first aim, or the
+    reading a follow (follow_box) moved it to — (reach_press._aim, the knob's
+    height above its own lid), once more where it reads the knob down or finds no button
     (KNOB_RECHECK_AIMS) — the highest reading the verdict, as the staging
-    run's after-look's was. A box the press slid farther than the staging
-    grip took (depth_press.SLIDE_OK_M) or whose lid the wrist
-    reads BOX_LIFTED_M off its reading before (`lid_before`) moved: STOP.
-    A lid LID_POP_M higher, the button where it was, was released
-    (lid_rose): its knob up, the grip follows it up; its knob flush, STOP —
-    nothing to hold, and a released lid is not pressed again. The reach_knob
-    note says which, and why the run stops."""
+    run's after-look's was. A button read farther from `button` than the
+    readings scatter (depth_press.SLIDE_OK_M) is aimed at once more before
+    anything is judged on it (_confirm_move: no button, or the two readings
+    apart, STOP), and the move judged from then on is the confirmed one.
+    Within SLIDE_OK_M: a lid the wrist reads BOX_LIFTED_M off its reading
+    before (`lid_before`) is the box moved, STOP; a lid LID_POP_M higher was
+    released (lid_rose): its knob up, the grip follows it up; its knob
+    flush, STOP — nothing to hold, and a released lid is not pressed again.
+    Past it, the box slid (never a risen lid): its lid BOX_LIFTED_M off, or
+    the move past REGRIP_MAX_M, STOP; else the run follows it (`move_xy`).
+    The reach_knob note says which, and why the run stops."""
     from box_opening.tasks.press_demo import knob_call, knob_is_up
 
     best, last, status, looks = None, None, "", 0
@@ -2307,12 +2351,32 @@ def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
     shift = rp.judge_box_moved(button, got[0])
     lid_after = rp._lid_z(measured[2], up)
     dz = None if lid_before is None or lid_after is None else lid_after - lid_before
+    # Past the dead band the reading is confirmed before anything is judged on it, and the move judged is
+    # the confirm's. The heights stay the look's (the confirm's knob height is not used)
+    confirm, confirmed, stop = None, None, None  # the second reading's move, whether it agreed: None, none taken
+    if shift > dp.SLIDE_OK_M:
+        confirm, confirmed, stop = _confirm_move(node, runner, watcher, button, yaw, got[0])
+        if stop is None:
+            shift = math.hypot(*confirm)
+    slid = stop is None and shift > dp.SLIDE_OK_M  # a confirmed move past the dead band: never a risen lid
     rose = dz is not None and LID_POP_M[0] <= dz <= LID_POP_M[1] and shift <= dp.SLIDE_OK_M
     look = KnobLook(True, best, shift, dz, status, lid_rose=rose)
-    if shift > dp.SLIDE_OK_M:
-        look.stop = "the press MOVED the box %.0f mm — check it is still standing on the table" % (1000 * shift)
+    if stop is not None:
+        look.stop = stop  # the second reading found no button, or does not agree with the first
     elif dz is not None and not rose and abs(dz) > rp.BOX_LIFTED_M:
-        look.stop = "the press moved the box: its lid %+.0f mm — check it is still standing on the table" % (1000 * dz)
+        look.stop = (
+            "the press MOVED the box %.0f mm, and its lid %+.0f mm — check it is still standing on the table"
+            % (1000 * shift, 1000 * dz)
+            if slid
+            else "the press moved the box: its lid %+.0f mm — check it is still standing on the table" % (1000 * dz)
+        )
+    elif slid and shift > REGRIP_MAX_M:
+        look.stop = (
+            "the press MOVED the box %.1f mm, farther than the %.0f mm a moved box is followed — check it is still "
+            "standing on the table" % (1000 * shift, 1000 * REGRIP_MAX_M)
+        )
+    elif slid:
+        look.move_xy = confirm
     elif rose and not look.popped:
         # the next run cannot tell: its aim judges the box by the knob alone
         # (press_demo.refuse_open_box), and to it this one is shut
@@ -2330,6 +2394,10 @@ def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
         popped=look.popped,
         call=knob_call(best),  # the band's: "shut" is pressed again, "band" gripped as "open", "unread" stops
         shift_mm=round(1000 * shift, 1),
+        move_mm=[round(1000 * v, 1) for v in _move_xy(button, got[0])],  # from where the box was last seen
+        confirm_mm=None if confirm is None else [round(1000 * v, 1) for v in confirm],
+        confirmed=confirmed,
+        followed=look.move_xy is not None,
         lid_dz_mm=None if dz is None else round(1000 * dz, 1),
         lid_rose=rose,
         stop=look.stop,
@@ -2346,7 +2414,7 @@ def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
             else ("%.1f mm above the lid" % best if best is not None else "not judged")
         )
     log.info(
-        "[press_demo] AFTER PRESS %d: knob %s (%d look%s); the button %.0f mm from where the press was aimed%s"
+        "[press_demo] AFTER PRESS %d: knob %s (%d look%s); the button %.0f mm from where the box was last seen%s"
         % (
             press,
             verdict,
@@ -2357,6 +2425,88 @@ def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
         )
     )
     return look
+
+
+def _confirm_move(node, runner, watcher, seen, yaw, first):
+    """The button read at `first`, farther than depth_press.SLIDE_OK_M from
+    `seen` (where the box was last seen from the look pose): one more aim
+    from there ('reach-confirm', on REGRIP_AIM_HITS agreeing hits, as
+    _regrip's, `first` its prior). Two readings from one pose by one method
+    differ by how far the box moved: the wrist mount's error and its depth
+    bias are in both. Returns (the second reading's move from `seen` in x
+    and y, or None where it found none; whether the two agree; why the run
+    stops, or None): it stops where the second reading finds no button or
+    stands more than depth_press.SLIDE_OK_M from the first — the same place
+    as far as a grip is concerned; the second's own REGRIP_AIM_HITS hits
+    agree within button_aim.AGREE_M, the first is one reading of two hits —:
+    the box may still be moving."""
+    first_move = _move_xy(seen, first)
+    got, status, _up, _measured = rp._aim(
+        node, watcher, yaw, seen[2], first[:2], runner, "reach-confirm", min_hits=REGRIP_AIM_HITS
+    )
+    if got is None:
+        return (
+            None,
+            False,
+            "the press MOVED the box %.0f mm (%s), and the wrist's second reading after it finds no button (%s) "
+            "— the box may still be moving; check it is still standing on the table"
+            % (1000 * math.hypot(*first_move), _mm_xy(first_move), status),
+        )
+    move = _move_xy(seen, got[0])
+    apart = rp.judge_box_moved(first, got[0])
+    if apart > dp.SLIDE_OK_M:
+        return (
+            move,
+            False,
+            "the press MOVED the box, but the wrist's two readings of the button after it do not agree: %s, then "
+            "%s from where it was seen, %.0f mm apart (more than %.0f) — the box may still be moving; check it is "
+            "still standing on the table" % (_mm_xy(first_move), _mm_xy(move), 1000 * apart, 1000 * dp.SLIDE_OK_M),
+        )
+    return move, True, None
+
+
+def follow_box(ctx, m, at, seen, why):
+    """The box slid `m` (base x and y, m) on the table, by two readings
+    from the look pose (`why` says which): everything the run holds about
+    where it is moves by `m`, in x and y only — a box that slid is as high
+    as it was, and is taken not to have turned. Returns (`at`, the button
+    the press once more and the grip go by, and `seen`, the reading later
+    looks are judged against): `seen` moved by `m`, the confirmed reading,
+    both — `at` keeping its own height. A sight's correction of the aim
+    (`at` a WayIn.sighted) is not carried across: the first aim, the sight
+    and the look cannot tell a box moved before the sight from one moved
+    after it, and keeping the correction would be exact in one and put the
+    grip more than SLIDE_OK_M past the knob in the other (a pad on the
+    knob's top on a rigid way down); the reading is off by the camera's
+    own bias in both. A press once more sights again. ctx.cpose (every world,
+    the lid's spots, the room: room_for judges the room again for a pose it
+    was not judged for) and ctx.held_xy (where it was set) move with it;
+    the home planned ahead from the look pose (ctx.home_ahead) was planned
+    round the box where it was, and a stop from here plans its own. What
+    the cameras saw before the slide stays where it was: the scene camera's
+    cloud is moved by its error at the box alone (scene_error_xy: the new
+    pose keeps the sum of the follows, FollowedPose), and so the counter's
+    keep-out boxes built from it stay too. Nothing is flown: the arm stands
+    at the look pose."""
+    c = ctx.cpose
+    f = getattr(c, "followed", (0.0, 0.0))
+    ctx.cpose = FollowedPose(
+        xyz=(float(c.xyz[0]) + m[0], float(c.xyz[1]) + m[1], float(c.xyz[2])),
+        yaw=c.yaw,
+        followed=(float(f[0]) + m[0], float(f[1]) + m[1]),
+    )
+    held = getattr(ctx, "held_xy", None)
+    if held is not None:
+        ctx.held_xy = (float(held[0]) + m[0], float(held[1]) + m[1])
+    ctx.home_ahead = None
+    log.info(
+        "[press_demo] FOLLOWING THE BOX: %s it %.0f mm from where it was last seen (%s in the arm's x and y) — "
+        "the grip, the lid's spot and any press once more go by where it is now"
+        % (why, 1000 * math.hypot(*m), _mm_xy(m))
+    )
+
+    now = (float(seen[0]) + m[0], float(seen[1]) + m[1], float(seen[2]))
+    return (now[0], now[1], float(at[2])), now
 
 
 # ---- the grip ---------------------------------------------------------------
@@ -3837,7 +3987,10 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
     lid did not rise (risen with its knob flush: knob_look's STOP), then the lid off
     (take_lid_off) at the aimed `button` (its top the press's) — its xy
     where a press's sight saw it, where one was followed (WayIn.sighted) —,
-    the grip going by the lid where the last hold held the pads (grip_lid_z). With
+    or, where the look found the press slid the box (KnobLook.move_xy,
+    follow_box), the confirmed reading itself, the sight's correction not
+    carried across the follow, the box moved with it; the grip going by
+    the lid where the last hold held the pads (grip_lid_z). With
     GRIP_FROM_PRESS the first press's hold goes straight on to the grip
     (_grip_from_hold), the lid video recording from the press on; where
     that grip misses, back at the look pose, the look and all after it as
@@ -3850,7 +4003,8 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
     node, watcher = eyes[0], eyes[1]
     tilt = way.plan.tilt_deg
     top_z = float(button[2])
-    at = button  # the button the press once more and the grip go by: the aim's, or where a sight saw it
+    at = button  # the button the press once more and the grip go by: the aim's, a sight's, or a followed reading
+    seen = button  # where the box was last seen from the look pose: the first aim, then each followed reading
     ctx.contact_pad = CONTACT_SHIFT_PAD_M  # the stroke meets the box by design: every world pads it from here
     held_z = None
     video = None
@@ -3871,8 +4025,8 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
             direct = None
             if GRIP_FROM_PRESS and press == 1:
 
-                def direct(seen, way=way):
-                    return _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room)
+                def direct(hold, way=way):
+                    return _grip_from_hold(ctx, cfg, runner, eyes, way, hold, room)
 
             code, z = _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=direct, eyes=eyes)
             if code is not None:
@@ -3880,13 +4034,17 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
             if way.sighted is not None:
                 # the sight before the stroke was followed (rp.fly_press_way_in): the press once more and the
                 # grip go by the button where it saw it. The knob is judged by the aim from the look pose
-                # against the first aim (`button`): two of the wrist's own readings from there, on one footing
+                # against where the box was last seen from there (`seen`): two of the wrist's own readings
+                # from there, on one footing
                 at = (way.sighted[0], way.sighted[1], at[2])
             held_z = z if z is not None else held_z
-            knob = knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press)
+            knob = knob_look(node, ctx, runner, watcher, seen, yaw, lid_before, press)
             _note_frames(ctx, popped=bool(knob.popped) if knob.found else None)
             if knob.stop is not None:
                 return end(_stop_home(ctx, cfg, runner, knob.stop))
+            if knob.move_xy is not None:
+                why = "after press %d the wrist's two readings from the look pose put" % press
+                at, seen = follow_box(ctx, knob.move_xy, at, seen, why)
             if not knob.found:
                 log.info(
                     "[press_demo] the knob is not judged after press %d (the wrist does not find the button): going "
@@ -3967,6 +4125,7 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
                 % (lid_z, top_z, "" if held_z is None else ", the pads held at %.3f" % held_z, rose),
                 yaw=yaw,
                 room=room,
+                seen=seen,
             )
         )
     except BaseException as e:
@@ -4015,17 +4174,13 @@ def _video_spot(ctx, eyes, drop):
         if T is None or K is None:
             return
         fix = eyes[2]
-        dx, dy = (
-            (0.0, 0.0)
-            if fix is None
-            else (float(fix.pose.xyz[0]) - float(ctx.cpose.xyz[0]), float(fix.pose.xyz[1]) - float(ctx.cpose.xyz[1]))
-        )
+        ex, ey = (0.0, 0.0) if fix is None else scene_error_xy(ctx, fix)
         r = 0.5 * max(float(ctx.model.lid_dims[0]), float(ctx.model.lid_dims[1]))
         a = np.linspace(0.0, 2.0 * math.pi, 48, endpoint=False)
         pts = np.stack(
             [
-                float(drop.xyz[0]) + dx + r * np.cos(a),
-                float(drop.xyz[1]) + dy + r * np.sin(a),
+                float(drop.xyz[0]) - ex + r * np.cos(a),
+                float(drop.xyz[1]) - ey + r * np.sin(a),
                 np.full_like(a, float(drop.xyz[2])),
             ],
             axis=1,
@@ -4197,20 +4352,28 @@ class _GripShot:
         )
 
 
-def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True):
-    """After a first close on air (`detail`, what it read): the fingers
+def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True, seen=None):
+    """After a first close on air (`detail`, what it read) at `button`: the fingers
     open and the hand backs out the grip's way down to the look pose
     (_back_to_look, home planned while it flies), and from there the wrist
     aims at the knob again (reach_press._aim, 'reach-regrip', on
-    REGRIP_AIM_HITS agreeing hits), as knob_look does after a press. Returns (the button the grip goes to
-    once more, None): the re-aim's x and y where it finds the knob no
-    farther than REGRIP_MAX_M from the aimed `button`, else — no knob
-    found — the aimed `button`'s, where the first grip went; its height the
-    aimed one's (take_lid_off lowers the grip's lid: GRIP_RETRY_LOWER_M).
-    Or (None, the exit code) where the run stops: the back-out did not fly
-    (the arm let go), or the knob is farther than that — the box moved —:
-    home from the look pose, flying the home planned on the way back.
-    Noted 'reach_regrip': the re-aim's point, its shift and what follows."""
+    REGRIP_AIM_HITS agreeing hits), as knob_look does after a press. Its
+    move is judged against `seen`, where the box was last seen from the look
+    pose (None: `button`), reading against reading, as the look after a
+    press judges one: more than REGRIP_MAX_M, the box moved — STOP; past
+    depth_press.SLIDE_OK_M, the box is followed by that move (follow_box),
+    so the lid's set-down is planned round it — never by more than the
+    limit. Returns (the button the grip goes to once more, None): the
+    re-aim's own x and y — the camera's fresh reading, never a sum of a
+    reading and a sight — or, no knob found, `button`'s, where the first
+    grip went; its height `button`'s (take_lid_off lowers the grip's lid:
+    GRIP_RETRY_LOWER_M). Or (None, the exit code) where the run stops: the
+    back-out did not fly (the arm let go), or the box moved: home from the
+    look pose, flying the home planned on the way back. Noted
+    'reach_regrip': the re-aim's point, its shift from `button`, its move
+    from `seen` (the one judged), whether the box was followed, and what
+    follows."""
+    seen = button if seen is None else seen
     code = _back_to_look(ctx, cfg, runner, way, "the grip closed on air (%s)" % detail, opened)
     if code is not None:
         runner.note("reach_regrip", found=None, outcome="the back-out did not fly")
@@ -4227,12 +4390,16 @@ def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True):
         )
         return tuple(float(v) for v in button), None
     shift = rp.judge_box_moved(button, got[0])
-    moved = shift > REGRIP_MAX_M
+    move = _move_xy(seen, got[0])
+    moved = math.hypot(*move) > REGRIP_MAX_M
+    followed = not moved and math.hypot(*move) > dp.SLIDE_OK_M
     runner.note(
         "reach_regrip",
         found=True,
         xyz=[round(v, 4) for v in got[0]],
         shift_mm=round(1000 * shift, 1),
+        move_mm=[round(1000 * v, 1) for v in move],  # from where the box was last seen
+        followed=followed,
         knob_up_mm=None if up is None else round(float(up), 1),
         outcome="home" if moved else "grip again",
     )
@@ -4242,8 +4409,8 @@ def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True):
             cfg,
             runner,
             "the grip closed on air (%s) and the wrist now sees the button %.0f "
-            "mm from where the first grip went — the box moved; the lid is not "
-            "taken off" % (detail, 1000 * shift),
+            "mm from where the box was last seen from the look pose — the box moved; the lid is not "
+            "taken off" % (detail, 1000 * math.hypot(*move)),
         )
     again = (float(got[0][0]), float(got[0][1]), float(button[2]))
     log.info(
@@ -4251,10 +4418,12 @@ def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True):
         "went%s — gripping once more there"
         % (again[0], again[1], 1000 * shift, "" if up is None else ", %.1f mm above its lid" % up)
     )
+    if followed:
+        follow_box(ctx, move, button, seen, "after the grip closed on air the wrist's re-aim puts")
     return again, None
 
 
-def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, attempt=1, room=None):
+def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, attempt=1, room=None, seen=None):
     """From the look pose, the knob up: the lid off, set down, home. The
     grip's way down (solve_grip_way, from where the arm stands), the
     fingers opening as it flies, ONE execution; while it flies, the lift,
@@ -4271,8 +4440,9 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
     close on air (_on_air), `yaw` given (the box's, for the aim): back out
     to the look pose, aim at the knob again (_regrip) and take_lid_off once
     more, `attempt` 2, at the re-aimed button — the same tilt and lid
-    height. Returns the exit code: 0 with the lid set down and the arm
-    home."""
+    height; `seen` (None: `button`) where the box was last seen from the
+    look pose, which the re-aim is judged against. Returns the exit code: 0
+    with the lid set down and the arm home."""
     from box_opening.tasks.press_demo import viz_hook
 
     world = _full_world(ctx)
@@ -4360,7 +4530,7 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
                 "GRIP MISSED (%s): back out to the look pose, aim again, %.0f mm lower"
                 % (detail, 1000 * GRIP_RETRY_LOWER_M),
             )
-            regrip, code = _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=not empty)
+            regrip, code = _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=not empty, seen=seen)
             if regrip is None:
                 return code
             lower = lid_z - GRIP_RETRY_LOWER_M
