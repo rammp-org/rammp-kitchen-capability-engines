@@ -664,3 +664,20 @@ def test_no_object_record_or_a_non_bool_opened_is_no_objection():
     node = DOOR["Capability"]()
     for world in ({}, {"objects": {}}, {"objects": {"fridge_1": None}}, _world("yes")):
         assert all(not node._ui_unavailable(a, "fridge_1", world) for a in DOOR["UI_ACTIONS"])
+
+
+@pytest.mark.parametrize("button", ["go_to_start_ui", "open_door_drive_ui"])
+def test_surveyed_mark_requires_confirmation_before_motion(button):
+    f = Flow(OK, answers=("continue", "done"))
+    parking = "Drive to the E mark."
+    f.node.cfg.update(guided_docking_enabled=True, guided_parking_instruction=parking)
+    assert f.press(button) == OK
+    assert f.ctx.messages()[0] == f"{parking} Stop the wheelchair, then press Continue."
+    assert len(f.calls) == 1
+
+    disconnected = Flow(OK, session=False)
+    disconnected.node.cfg.update(guided_docking_enabled=True, guided_parking_instruction=parking)
+    with pytest.raises(EngineError) as refusal:
+        disconnected.press(button)
+    assert refusal.value.error_code == "parking_required"
+    assert disconnected.calls == []

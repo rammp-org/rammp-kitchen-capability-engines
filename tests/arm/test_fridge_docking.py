@@ -337,3 +337,17 @@ def test_guided_lateral_route_keeps_a_shallow_view_and_reaches_target():
     distance, turn = docking.guided_step(displacement, yaw, None, lambda *_: None)
     assert distance == 0.0
     assert turn == docking.GUIDED_TURN
+
+
+def test_autonomous_dock_uses_shallow_route_when_steep_turns_are_blocked():
+    displacement = np.array([0.0, 0.07])
+
+    def guard(_, route):
+        if any(abs(angle) > docking.GUIDED_LOOK_HEADING for _, angle in route):
+            raise Refused("Steep turn blocked")
+
+    route, distance, heading = docking.checked_route(displacement, 0.0, 0.35, math.pi, None, guard)
+    position, yaw = list(docking.route_samples(route))[-1]
+    assert position == pytest.approx(displacement)
+    assert yaw == pytest.approx(0.0)
+    assert distance <= 0.35 and heading <= math.pi
