@@ -695,7 +695,9 @@ class Capability(CapabilityEngine):
 
             def wrist_look():
                 camera.require_frames_after_now()
-                if planner is not None and self.cfg["door_normal"] == "handle_model":
+                # Predictive docking may still have a planner request and a
+                # checked ready prefix to reverse on a refused observation.
+                if planner is not None and preview is None and self.cfg["door_normal"] == "handle_model":
                     return open_door.detect_with_wrist_relook(
                         self.arm, planner, camera, lambda: detected[0]["closed_model"]
                     )
@@ -860,28 +862,26 @@ class Capability(CapabilityEngine):
             def dock_then_contact(preview=None):
                 if guidance_requested:
                     detected = self._dock_open(
-                        ctx, world, camera, base_speed, self.cfg, planner=planner, guided=True, autonomous=docking_requested
+                        ctx,
+                        world,
+                        camera,
+                        base_speed,
+                        self.cfg,
+                        planner=planner,
+                        guided=True,
+                        autonomous=docking_requested,
                     )
                 else:
-                    detected = self._dock_open(ctx, world, camera, base_speed, base_cfg, planner=planner, preview=preview)
+                    detected = self._dock_open(
+                        ctx, world, camera, base_speed, base_cfg, planner=planner, preview=preview
+                    )
                 contact.enter_context(self._contact_expected(execute))
                 return detected
 
             def start_wrist():
                 def scene_model():
-                    topics = tuple(
-                        self.cfg[k] for k in ("scene_color_topic", "scene_camera_info_topic", "scene_depth_topic")
-                    )
-                    if not all(topics):
-                        raise dc.Refused("The scene camera topics are unavailable.")
-                    scene = WristCamera(
-                        self,
-                        *topics,
-                        rammp_arm.FRAME,
-                        sam3=self.sam3,
-                        sam3_prompts=self.cfg["sam3_prompts"],
-                        sam3_threshold=self.cfg["sam3_threshold"],
-                    )
+                    scene = self._open_scene_camera(camera)
+                    scene.require_frames_after_now()
                     dc.set_camera(scene)
                     try:
                         geom, _ = open_door.detect(self.arm, for_docking=True)
@@ -893,6 +893,7 @@ class Capability(CapabilityEngine):
 
             def retry_wrist():
                 if self.cfg["detect_camera"] == "wrist":
+                    camera.require_frames_after_now()
                     return open_door.detect(self.arm)
                 wrist = WristCamera(
                     self,
