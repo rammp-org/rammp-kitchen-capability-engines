@@ -9,7 +9,7 @@ import numpy as np
 from capability_engine import BaseError
 from door_common.common import Refused
 
-from . import base_drive
+from . import arrival, base_drive
 from .door_sweep import DoorSweep
 
 # H and inward normal relative to arm_mount at the WS11-E floor mark.
@@ -68,12 +68,12 @@ def route_options(delta, yaw):
             yield ((-retreat, 0.0), *legs(remaining, yaw, other_direction=other_direction))
 
 
-def checked_route(delta, yaw, remaining_d, remaining_yaw, geom, guard):
+def checked_route(delta, yaw, remaining_d, remaining_yaw, geom, guard, *, detour=False, max_leg=math.inf):
     blocked = None
-    for route in guided_routes(delta, yaw):
+    for route in guided_routes(delta, yaw, detour=detour):
         travel = sum(abs(d) + TRANSLATION_TOL for d, _ in route if abs(d) > TRANSLATION_TOL)
         turning = sum(abs(a) + TURN_TOL for _, a in route if abs(a) > TURN_TOL)
-        if travel > remaining_d or turning > remaining_yaw:
+        if travel > remaining_d or turning > remaining_yaw or any(abs(d) > max_leg for d, _ in route):
             continue
         try:
             guard(geom, route)
@@ -221,6 +221,8 @@ def dock(
     on_motion,
     on_route=None,
     confirm=None,
+    arrival_check=None,
+    arrival_relook=None,
     target_handle=TARGET_HANDLE,
     target_yaw=TARGET_YAW,
     clock=time.monotonic,
@@ -261,15 +263,42 @@ def dock(
     def observe():
         return stationary_look(base, arm, look, odom_to_axle, mode_entered=entered)
 
+    back = 0.0
+    if arrival_check is not None:
+        ctx.checkpoint()
+        parked = np.asarray(arm.joint_states().position, float)
+        back = stationary_look(base, arm, arrival_check, odom_to_axle, mode_entered=False)
+        if back:
+            if not math.isfinite(back) or not 0 < back <= min(arrival.MAX_REVERSE_M, cfg["base_max_distance"]):
+                raise Refused(arrival.REPARK)
+
+            def hold_arm():
+                joints = np.asarray(arm.joint_states().position, float)
+                if not np.isfinite(joints).all() or np.max(np.abs(joints - parked)) > math.radians(0.5):
+                    raise BaseError("The arm moved during arrival recovery")
+
+            hold_arm()
+            on_motion()
+            base.request_mode("autonomous", profile=cfg["base_profile"])
+            entered = True
+            _drive_leg(base, arm, ctx, -back, 0.0, speed, yaw_speed, odom_to_axle, deadline, clock, sleep, hold_arm)
+            hold_arm()
+            # Recovery is separately capped. Allow at most 25 cm of additional
+            # checked correction travel for this one recovered arrival.
+            remaining_d += 0.25
+
     for index in range(MAX_LOOKS):
         ctx.checkpoint()
         try:
             geom, q = observe()
         except Refused:
-            if ready is None:
+            if index == 0 and back and arrival_relook is not None:
+                geom, q = stationary_look(base, arm, arrival_relook, odom_to_axle, mode_entered=entered)
+            elif ready is not None:
+                park_ready()
+                geom, q = observe()
+            else:
                 raise
-            park_ready()
-            geom, q = observe()
         if clock() >= deadline:
             raise Refused("Docking timed out waiting for a stationary camera observation")
         handle, normal = geom["h_raw"], geom["n"]
@@ -291,7 +320,21 @@ def dock(
         if ready is not None:
             park_ready()
             q = np.asarray(arm.joint_states().position, float)
-        route, distance, rotation_travel = checked_route(delta, yaw, remaining_d, remaining_yaw, geom, guard)
+        try:
+            route, distance, rotation_travel = checked_route(
+                delta,
+                yaw,
+                remaining_d,
+                remaining_yaw,
+                geom,
+                guard,
+                detour=arrival_check is not None,
+                max_leg=cfg["base_max_distance"],
+            )
+        except Refused as error:
+            if arrival_check is None:
+                raise
+            raise Refused(f"{error} {arrival.REPARK}") from error
         if not entered:
             on_motion()
             base.request_mode("autonomous", profile=cfg["base_profile"])
@@ -319,7 +362,8 @@ def dock(
                 _drive_leg(base, arm, ctx, d, a, speed, yaw_speed, odom_to_axle, deadline, clock, sleep, step)
         remaining_d -= distance
         remaining_yaw -= rotation_travel
-    raise Refused("Docking did not converge within three corrections. Repark the chair.")
+    hint = arrival.REPARK if arrival_check is not None else "Repark the chair."
+    raise Refused(f"Docking did not converge within three corrections. {hint}")
 
 
 GUIDED_STEP_M = 0.10
@@ -340,8 +384,19 @@ def guidance_text(distance, turn):
     return f"{movement}, then stop. Keep the route clear. Wait here while I check again."
 
 
-def guided_routes(delta, yaw):
+def guided_routes(delta, yaw, *, detour=False):
     yield from route_options(delta, yaw)
+    if detour:
+        # Turn to the target heading farther out, then approach the dock
+        # straight so the arm and footrest do not sweep across its front.
+        forward = rotation(yaw)[:, 0]
+        for advance in (0.12, 0.20):
+            for reverse in (False, True):
+                yield (*legs(delta - advance * forward, yaw, other_direction=reverse), (advance, 0.0))
+        for retreat in (0.22, 0.30):
+            remaining = delta + np.array([retreat, 0])
+            for reverse in (False, True):
+                yield ((-retreat, 0.0), *legs(remaining, yaw, other_direction=reverse))
     # A shallow diagonal followed by a straight correction can make a
     # lateral move without turning the handle out of the cameras.
     along, across = rotation(-yaw) @ delta
@@ -479,7 +534,9 @@ def route_samples(route):
         axle, heading = axle + delta, heading + turn
 
 
-def check_route(model, boxes, padding, route, axle_to_mount, *, door_angle=0.0):
+def check_route(
+    model, boxes, padding, route, axle_to_mount, *, door_angle=0.0, tracking_margin=0.08, appliance_padding=None
+):
     """Sweep the moving chair boxes against the fitted, stationary appliance."""
     if not boxes:
         raise Refused("Docking requires the measured chair and occupant layers")
@@ -500,6 +557,22 @@ def check_route(model, boxes, padding, route, axle_to_mount, *, door_angle=0.0):
                 }
             )
     # Allow for between-sample travel, pose fit, tracking error and axle calibration.
-    obstacle = DoorSweep(model, swept, door_angle, door_angle, padding + 0.08, appliance=True).obstacle()
+    obstacle = DoorSweep(
+        model,
+        swept,
+        door_angle,
+        door_angle,
+        padding + tracking_margin,
+        appliance=True,
+        appliance_padding=appliance_padding,
+    ).obstacle()
     if obstacle is not None:
         raise Refused(f"Docking route blocked by {obstacle}. Repark the chair.")
+
+
+def check_raw_route(model, chair, arm_boxes, padding, route, axle_to_mount):
+    """Keep occupant padding and account for planar tracking error at the parked arm."""
+    check_route(model, chair, padding, route, axle_to_mount)
+    # The arm envelopes are measured against the physical appliance. Apply
+    # planner padding and the tracking allowance once to each separation.
+    check_route(model, arm_boxes, padding, route, axle_to_mount, tracking_margin=0.035, appliance_padding=0.0)

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 from door_common.common import Refused
-from fridge import base_drive, docking
+from fridge import arrival, base_drive, docking
 
 from capability_engine import BaseError, Cancelled
 
@@ -61,6 +61,9 @@ class VirtualBase:
             twist=Obj(twist=Obj(linear=Obj(x=self.command[0]), angular=Obj(z=self.command[1]))),
         )
 
+    def joint_states(self):
+        return Obj(position=np.zeros(7))
+
     def control_status(self):
         return Obj(estopped=self.estopped)
 
@@ -84,6 +87,8 @@ def run_dock(
     assume_odom_to_axle=docking.ODOM_TO_AXLE,
     on_route=None,
     confirm=None,
+    arrival_check=None,
+    arrival_relook=None,
 ):
     mount = np.asarray(docking.AXLE_TO_MOUNT[:2])
 
@@ -106,9 +111,55 @@ def run_dock(
         on_motion=lambda: None,
         on_route=on_route,
         confirm=confirm,
+        arrival_check=arrival_check,
+        arrival_relook=arrival_relook,
         clock=base.monotonic,
         sleep=base.sleep,
     )
+
+
+def test_depth_allows_reversing_a_padding_only_arm_overlap(monkeypatch):
+    y, z = np.meshgrid(np.linspace(-0.26, 0.26, 27), np.linspace(0.43, 0.75, 20))
+    face = np.column_stack((np.full(y.size, 0.52), y.ravel(), z.ravel()))
+    monkeypatch.setattr(arrival, "depth_points", lambda _: face)
+    chair = [dict(name="chair", position=[0.10, 0.0, -0.10], dims=[0.30, 0.40, 0.40])]
+    arm = [dict(name="arm", position=[0.405, 0.0, 0.50], dims=[0.20, 0.14, 0.14])]
+    reverse = arrival.reverse_distance(None, chair, arm, padding=0.02)
+    assert reverse == pytest.approx(0.185, abs=0.01)
+    assert 0.52 + reverse - 0.505 >= 0.19
+
+
+def test_close_arrival_backs_straight_before_looking_or_preparing_arm():
+    ctx = Ctx()
+    base = VirtualBase((0.12, 0.0, 0.0), ctx)
+    events = []
+
+    def assess():
+        assert not base.commands
+        events.append("depth")
+        return 0.25
+
+    def prepare(*_):
+        nonzero = [(vx, wz) for vx, wz in base.commands if vx or wz]
+        assert nonzero and all(vx < 0 and wz == 0 for vx, wz in nonzero)
+        assert base.pose[0] == pytest.approx(-0.13, abs=docking.TRANSLATION_TOL)
+        events.append("prepare")
+
+    run_dock(base, ctx, on_route=prepare, arrival_check=assess)
+    assert events == ["depth", "prepare"]
+    assert base.mode_calls == 1
+
+
+def test_close_arrival_stops_on_unexpected_arm_motion():
+    ctx = Ctx()
+    base = VirtualBase((0.12, 0.0, 0.0), ctx)
+    joints = np.zeros(7)
+    base.joint_states = lambda: Obj(position=joints.copy())
+    base.on_sleep = lambda: joints.fill(0.02)
+
+    with pytest.raises(BaseError, match="arm moved during arrival recovery"):
+        run_dock(base, ctx, arrival_check=lambda: 0.25)
+    assert base.commands[-1] == (0, 0)
 
 
 def test_dock_checks_and_executes_rotate_translate_rotate():

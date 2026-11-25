@@ -61,7 +61,17 @@ class DoorSweep:
     """
 
     def __init__(
-        self, model, boxes, start, end, padding=LAYER_PADDING_M, *, translation=None, push_grid=False, appliance=False
+        self,
+        model,
+        boxes,
+        start,
+        end,
+        padding=LAYER_PADDING_M,
+        *,
+        translation=None,
+        push_grid=False,
+        appliance=False,
+        appliance_padding=None,
     ):
         self.names = [box["name"] for box in boxes]
         if not boxes:
@@ -85,7 +95,7 @@ class DoorSweep:
         angle_bound = np.radians(np.minimum(180, np.abs(angles) + half_step))
         hinge_pad = F.DOOR_SWEEP_HINGE_MARGIN_M * np.maximum(1, 2 * np.sin(angle_bound / 2))
         dims[:count, :2] += hinge_pad[:, None] + radius * np.radians(half_step) + 0.00002
-        dims[count:] += padding  # the stationary support is padded in the arm's collision world too
+        dims[count:] += padding if appliance_padding is None else appliance_padding
         if translation is not None:
             shift = np.asarray(translation) / 2
             centres += shift
