@@ -245,7 +245,7 @@ class Capability(CapabilityEngine):
                 "properties": {
                     **COMMON,
                     "speed": {key: value for key, value in COMMON["speed"].items() if key != "default"},
-                    "profile": {"type": "string", "enum": ["standard", "fast"], "default": "standard"},
+                    "profile": {"type": "string", "enum": ["standard", "fast", "hook"], "default": "standard"},
                     "swing_deg": {"type": "integer", "minimum": 30, "maximum": 110},
                     "push_open": {"type": "boolean", "default": True},
                     "short_reentry": {"type": "boolean"},
@@ -771,9 +771,9 @@ class Capability(CapabilityEngine):
         self._drove = False  # whether this goal has driven the wheelchair (drive_base)
         self._guided = False
         profile = params.get("profile", "standard") if action_id == "open" else "standard"
-        if profile not in ("standard", "fast"):
-            raise EngineError("bad_params", "'profile' must be standard or fast", recoverable=True)
-        fast = profile == "fast"
+        if profile not in ("standard", "fast", "hook"):
+            raise EngineError("bad_params", "'profile' must be standard, fast or hook", recoverable=True)
+        fast = profile in ("fast", "hook")
         default_speed = constants.CLOSE_SPEED if action_id == "close" else 0.7 if fast else 1.0
         speed = float(params.get("speed", default_speed))
         if not 0.0 < speed <= 1.0:
@@ -960,6 +960,7 @@ class Capability(CapabilityEngine):
                     allow_short_handoff=docking_requested,
                     short_reentry=bool(params.get("short_reentry", fast)),
                     fast=fast,
+                    hook=profile == "hook",
                     predictive=fast and may_dock and docking_requested and not guidance_requested,
                 )
                 if ok and execute:  # the door file is true now: the view the close re-detects the fridge against

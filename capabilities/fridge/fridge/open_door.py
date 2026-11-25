@@ -64,6 +64,11 @@ from .push_open import PushOpen, back_off_goals, push_after_chair_move
 from .world import FridgeModel, configure_handle
 
 GRASP_TRACK_ABORT_M = 0.03  # the approach must end the tool this close to the grasp, or the gripper stays open
+HOOK_ANGLE_DEG = 94.0
+HOOK_CLOSURE = 0.82
+HOOK_FORCE = 0.15
+HOOK_BACK_OFF_M = 0.05
+HOOK_LAGS_DEG = (55.0, 60.0, 45.0)
 REPLAN_DEG = 1.0  # after the grasp, the swing is planned again from the real joints if they are further than this off
 
 
@@ -585,7 +590,7 @@ def swing_goals(model, cand, swing, lag=0.0):
     df = model.df
     n = max(2, int(np.ceil(swing / SWING_POINT_DEG)))
     degs = [swing * k / n for k in range(1, n + 1)]
-    if cand.get("side"):
+    if cand.get("side") or cand.get("hook"):
         poses = S.swing_poses(cand, df, swing, lag, degs)
     else:
         poses = [swung(cand["pos"], cand["quat"], df.hinge, df.sign, d) for d in degs]
@@ -597,7 +602,7 @@ def swing_goals(model, cand, swing, lag=0.0):
             f"swing to {swing:.0f} deg",
             model.cabinet(),
             world_label="the cabinet (the door turns with the hand)",
-            segment_worlds=S.swing_worlds(model, degs) if cand.get("side") else None,
+            segment_worlds=S.swing_worlds(model, degs) if cand.get("side") or cand.get("hook") else None,
         )
     ]
 
@@ -1256,7 +1261,9 @@ def execute_open(ai, planner, plan, *, fast=False):
     say(f"grasp: tracking {e * 100:.1f} cm")
     if e > GRASP_TRACK_ABORT_M:
         raise Refused(f"Tracking {e * 100:.1f} cm at the grasp -- ABORT, gripper untouched.")
-    confirm_grasp(ai)
+    hook = cand.get("hook", False)
+    if not hook:
+        confirm_grasp(ai)
     dc.DOOR_FILE.unlink(missing_ok=True)
     relocalize.ref_file().unlink(missing_ok=True)
     save_door_geometry(**plan["door"], door_mid=plan.get("door_mid"))
@@ -1268,6 +1275,8 @@ def execute_open(ai, planner, plan, *, fast=False):
     sw = plan["swing"]
     off = float(np.degrees(np.max(np.abs(pl._short_delta(sw.q0, st["position"])))))
     if off > REPLAN_DEG:
+        if hook:
+            raise Refused("Hook pull start differs from preflight, stopping with the gripper open.")
         say(f"  the grasp joints are {off:.1f} deg off the plan's -- planning the swing again from them")
         real = dict(cand, pos=np.asarray(st["ee_pos"][:3]), quat=np.asarray(st["ee_pos"][3:7]))
         sw, why = planner.motion(
@@ -1294,6 +1303,13 @@ def execute_open(ai, planner, plan, *, fast=False):
     # Reuse the checked preflight pull when the measured grasp agrees.
     if sw.joined is None:
         planner.join(sw, model.cabinet())
+    if hook:
+        if ai.gripper(HOOK_CLOSURE, force=HOOK_FORCE) is False:
+            raise Refused("Could not close to the hook position.")
+        grip = ai.gripper_state() if hasattr(ai, "gripper_state") else None
+        position = float(grip.position if grip is not None else ai.get_state()["gripper_pos"])
+        if (grip is not None and not grip.present) or not np.isfinite(position) or position <= 0.2:
+            raise Refused("No valid closed gripper feedback after the hook command.")
     say(f"swing {plan['swing_deg']} deg, to a stop there ({float(sw.joined.t[-1]):.1f} s); then the gripper opens")
     # the door, not the plan, sets where the hand ends (F.SWING_END_TOL_M): judged by the angle it reached
     with ArcTrace(ai) as arc:
@@ -1305,6 +1321,20 @@ def execute_open(ai, planner, plan, *, fast=False):
         )
     finished = planner.finished  # the driver ran the whole swing (no stop), wherever the hand ended
     final = ai.get_state()
+    if hook:
+        closure = float(final["gripper_pos"])
+        say(f"  hook finger closure: {hook_closure_at_grasp:.3f} at grasp, {closure:.3f} after pull")
+        if closure <= 0.2:
+            say("  hook retention check: the fingers reopened during the pull")
+            return False
+        inferred = model.df.sign * hand_angle(plan["door"], final["ee_pos"])
+        say(f"  hook angle from the tool and bar geometry: {inferred:.1f}°")
+        save_door_geometry(door_open_deg=max(0.0, inferred), open_sign=model.df.sign)
+        if not ok or not (90.0 <= inferred <= HOOK_ANGLE_DEG + 2):
+            return False
+        plan["after"].replan = abs(inferred - HOOK_ANGLE_DEG) > 1.0
+        P._release(ai, early=fast)
+        return True
     fitted = record_swing_hinge(arc.xy)  # the real hinge, for the angle below and all after (the push-open, the close)
     record_hand_angle(final["ee_pos"])  # the hand still holds the handle: it says where the door is
     deg = float(load_door()["door_open_deg"])
@@ -1419,6 +1449,124 @@ class ReleaseBackOff(_AfterPull):
 
     def goals(self, model, deg, hold_pose, via):
         return None if via else back_off_goals(model, deg, hold_pose)
+
+
+class HookBackOff(_AfterPull):
+    """Clear the bar along the insertion axis on the exterior side."""
+
+    title = "back off after hook pull"
+
+    def goals(self, model, deg, hold_pose, via):
+        if via:
+            return None
+        pos, quat = hold_pose
+        pos = np.asarray(pos)
+        hand = R.from_quat(quat)
+        offset = hand.as_matrix()[:, 2] * HOOK_BACK_OFF_M
+        end = pos - offset
+        # Withdraw first, then ease J6 toward alignment with the arm reach.
+        target = R.from_quat(S.unbend(end, quat))
+        turn = (target * hand.inv()).as_rotvec()[2]
+        orientation = (R.from_euler("z", np.clip(turn, *np.radians([-15, 15]))) * hand).as_quat()
+        return [
+            pl.through(
+                [(pos - offset / 2, quat), (end, orientation)],
+                self.title,
+                S.hold_world(model, (max(0.0, deg - 2), deg + 2)),
+            )
+        ]
+
+
+def _plan_hook(planner, plan, geom):
+    """Try a stationary hook from the already checked approach."""
+    model = plan["model"]
+    original = plan["cand"]
+    if original.get("side") or original["flip"]:
+        return None
+    cand = dict(original, bar=np.asarray(geom["h_raw"], float), hook=True)
+    closed = closed_door(geom, cand["h"], cand["pos"], cand)
+    try:
+        check_open(model, planner.world, (HOOK_ANGLE_DEG + 2,), None)
+        for lag in HOOK_LAGS_DEG:
+            swing, why = planner.motion(
+                swing_goals(model, cand, HOOK_ANGLE_DEG, lag),
+                plan["approach"].q_end,
+                start_pose=(cand["pos"], cand["quat"]),
+            )
+            if swing is None:
+                say(f"  hook lag {lag:g}° declined: {why}")
+                continue
+            after = HookBackOff()
+            door = opened(closed, HOOK_ANGLE_DEG)
+            end = swing.goals[-1]
+            ok, why = after.plan(planner, door, swing.q_end, (end.pos, end.quat))
+            if not ok:
+                say(f"  hook lag {lag:g}° declined: {why}")
+                continue
+            planner.join(swing, model.cabinet())
+            planner.join(after.motion, model.cabinet())
+            return dict(
+                plan,
+                door=closed,
+                cand=cand,
+                swing=swing,
+                swing_deg=HOOK_ANGLE_DEG,
+                lag=lag,
+                name="stationary hook pull",
+                after_msg="stationary hook pull and exterior release",
+                after=after,
+            )
+    except Refused as e:
+        say(f"  hook preflight declined: {e}")
+    return None
+
+
+def _hook_preflight(planner, geom, q0, staging):
+    """Plan the validated front approach before searching the push fallback."""
+    if F.GRASP == "side":
+        return None
+    cand = next((g for g in grasp_candidates(geom, "front") if g["pitch"] == 25 and not g["flip"]), None)
+    if cand is None:
+        return None
+    model = FridgeModel(closed_door(geom, cand["h"], cand["pos"], cand))
+    planner.search()
+    try:
+        parked = np.radians(F.START_JOINTS_DEG) if staging is None else staging
+        if planner.preflight_start(model.full(0.0), q0, parked):
+            return None
+        standoff = standoffs(cand)[0]
+        approach, why = planner.motion(approach_goals(model, cand, standoff), q0, from_arm=True)
+        if approach is None:
+            say(f"  hook approach declined: {why}")
+            return None
+        planner.join(approach, model.cabinet())
+        plan = _plan_hook(planner, dict(cand=cand, model=model, approach=approach), geom)
+        planner.check_deadline()
+        return plan
+    except Refused as e:
+        say(f"  hook approach declined: {e}")
+        return None
+
+
+def _select_open_plan(planner, geom, q0, staging, hook, fallback):
+    if not hook:
+        return fallback()
+    previous_deadline = planner.deadline
+    deadline = time.monotonic() + OPEN_POLICY_S
+    if previous_deadline is not None:
+        deadline = min(deadline, previous_deadline)
+    try:
+        # Leave time for the standard search when the hook cannot be checked.
+        planner.deadline = deadline - OPEN_PREFLIGHT_S
+        plan = _hook_preflight(planner, geom, q0, staging)
+        if plan is not None:
+            say("  preflight selected the stationary hook pull")
+            return plan
+        planner.deadline = deadline
+        say("  hook preflight declined; searching the fast push open")
+        return fallback()
+    finally:
+        planner.deadline = previous_deadline
 
 
 def release_back_off(ai, planner, execute):
@@ -1556,6 +1704,7 @@ def run(
     short_reentry=False,
     fast=False,
     predictive=False,
+    hook=False,
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. `planner`: this action's planning.Planner.
     Pull to `swing_deg` when specified, or SWING_DEG without `push`. The automatic push-open searches front then side
@@ -1569,7 +1718,9 @@ def run(
     in the arm's frame. `drive_chair` (the goal's drive_base: base_drive.move_chair): the push-open's wheelchair move is
     driven by the base within this goal, not asked for. `base_moves` False: the open plans no wheelchair move at all
     (the push from where the chair stands, or it refuses), and the placement advice leaves out the cells that need
-    one (constants CELLS_NEEDING_BASE_MOVE). Returns True when it finished (or the dry run passed); raises Refused."""
+    one (constants CELLS_NEEDING_BASE_MOVE). `hook` tries a stationary partial-closure pull when the default opening
+    angle is requested, with the normal checked push as a pre-motion fallback. Returns True when it finished
+    (or the dry run passed); raises Refused."""
     global BASE_MOVES
     P.NEXT_STEP, P.NEXT_MOVE, P.FINAL_ANGLE_DEG = "", 0.0, None
     BASE_MOVES = bool(base_moves)
@@ -1622,17 +1773,26 @@ def run(
         h, n = geom["h_raw"], geom["n"]
         start = f"Start joints {np.round(np.degrees(q0), 1)}."
         try:
-            plan = plan_open(
+            plan = _select_open_plan(
                 planner,
                 geom,
                 q0,
-                swing,
-                after,
-                staging=staging,
-                adaptive_pull=adaptive_pull,
-                progress=progress,
-                **({"prediction": prediction} if prediction is not None else {}),
+                staging,
+                hook and push and swing_deg is None,
+                lambda: plan_open(
+                    planner,
+                    geom,
+                    q0,
+                    swing,
+                    after,
+                    staging=staging,
+                    adaptive_pull=adaptive_pull,
+                    progress=progress,
+                    prediction=prediction,
+                ),
             )
+            if plan["cand"].get("hook"):
+                after = plan["after"]
         except Infeasible as e:  # not plannable from here: where to put the wheelchair is the answer
             if e.payload.get("reason") == "door_sweep_blocked":
                 raise
@@ -1658,12 +1818,13 @@ def run(
         plan.update(after=after, hinge_fields=geom["hinge_fields"], door_mid=geom["door_mid"])
         LAST_PLAN = dict(plan, geom=geom, q0=q0)
         say(f"  planning: {planner.summary()}")
-        record_proven(plan, geom, "plan")  # the next search tries this grasp first (proven.py)
+        if not plan["cand"].get("hook"):
+            record_proven(plan, geom, "plan")  # the next search tries this grasp first (proven.py)
         if not execute:
             say(f"\nDRY RUN -- would grasp, then swing {plan['swing_deg']} deg. Nothing commanded.")
             after.dry_run(drive_chair)
             if save_door:
-                save_planned_door(plan, push, after)
+                save_planned_door(plan, push and not plan["cand"].get("hook"), after)
             return True
         try:
             swung = execute_open(ai, planner, plan, fast=fast)
@@ -1695,8 +1856,12 @@ def run(
                 )
             )
             return False
-        record_proven(plan, geom, "arm")  # the swing finished on the arm: tried before ones that only planned
-        return after.execute(ai, planner, drive_chair)
+        if not plan["cand"].get("hook"):
+            record_proven(plan, geom, "arm")  # the swing finished on the arm: tried before ones that only planned
+        ok = after.execute(ai, planner, drive_chair)
+        if ok and plan["cand"].get("hook"):
+            P.FINAL_ANGLE_DEG = float(load_door()["door_open_deg"])
+        return ok
 
     ok = logged_run("open", ai, log_args or {}, speed, task, fast=fast)
     say(f"\nOPEN {'OK' if ok else 'STOPPED'}{'' if execute else ' (dry run)'}")
