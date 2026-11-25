@@ -172,6 +172,7 @@ params:
   docking_enabled: false
   guided_docking_enabled: false
   open_scene_fallback_enabled: false
+  open_wrist_relook_enabled: false
   docking_target_handle_xy: [0.825, -0.235]
   docking_target_yaw_deg: -14.0
   docking_max_linear_speed: 0.05

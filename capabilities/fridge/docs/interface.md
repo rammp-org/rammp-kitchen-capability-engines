@@ -84,7 +84,8 @@ with the inward normal at −14° relative to chair forward. The position and he
 2.5 cm and 2°. Set `docking_target_handle_xy` and `docking_target_yaw_deg` for a measured alternate dock.
 Set `hinge_side: right` for a right-hinged fixture. Both `guided_docking_enabled` (checked manual steering
 instructions in the Open panel) and `open_scene_fallback_enabled` (fixed-base scene look after wrist refusal)
-default to false. With `execute: false`, the arm plans from the current parking pose and the base stays still.
+default to false. Keep `open_wrist_relook_enabled` false until the scene extrinsics are verified. The
+alternate wrist moves use the closed-door model from the scene camera. With `execute: false`, the arm plans from the current parking pose and the base stays still.
 
 Docking defaults to `docking_max_linear_speed: 0.05` m/s and `docking_max_yaw_speed: 0.12` rad/s.
 The settings accept up to 0.15 m/s and 0.30 rad/s respectively. Translation also observes the

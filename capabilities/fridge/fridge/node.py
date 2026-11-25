@@ -144,6 +144,7 @@ PARAMS = {
     "docking_max_linear_speed": 0.05,
     "docking_max_yaw_speed": 0.12,
     "docking_enabled": False,  # fixture A / Gen1.5, after verifying the route and odometry datum on hardware
+    "open_wrist_relook_enabled": False,  # alternate wrist motion needs calibrated scene geometry
     "open_scene_fallback_enabled": False,  # retry a refused fixed-base wrist look on the scene camera
     "guided_docking_enabled": False,  # show checked drive steps on the Open UI buttons
     "docking_target_handle_xy": docking.TARGET_HANDLE.tolist(),
@@ -698,7 +699,12 @@ class Capability(CapabilityEngine):
                 camera.require_frames_after_now()
                 # Predictive docking may still have a planner request and a
                 # checked ready prefix to reverse on a refused observation.
-                if planner is not None and preview is None and self.cfg["door_normal"] == "handle_model":
+                if (
+                    planner is not None
+                    and preview is None
+                    and self.cfg.get("open_wrist_relook_enabled")
+                    and self.cfg["door_normal"] == "handle_model"
+                ):
                     return open_door.detect_with_wrist_relook(
                         self.arm, planner, camera, lambda: detected[0]["closed_model"]
                     )
@@ -945,7 +951,10 @@ class Capability(CapabilityEngine):
                     progress=lambda fraction, message: ctx.progress(action_id, fraction, message, pausable=False),
                     detect_at_dock=detect_open,
                     detect_at_start=start_wrist
-                    if execute and self.cfg["detect_camera"] == "wrist" and self.cfg["door_normal"] == "handle_model"
+                    if execute
+                    and self.cfg.get("open_wrist_relook_enabled")
+                    and self.cfg["detect_camera"] == "wrist"
+                    and self.cfg["door_normal"] == "handle_model"
                     else None,
                     detect_retry=retry_wrist,
                     allow_short_handoff=docking_requested,
