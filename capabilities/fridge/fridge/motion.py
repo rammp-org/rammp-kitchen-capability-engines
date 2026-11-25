@@ -8,6 +8,7 @@ import time
 import numpy as np
 import rammp_arm
 from door_common import common as dc
+from door_common import timing
 from door_common.common import Refused, RunLog, say
 
 _CONSOLE = None  # the running goal's console.log (logged_run sets it), or None between runs
@@ -89,10 +90,11 @@ def logged_run(what, ai, log_args, speed, task, *, fast=False):
     log = bag = None
     ok = False
     try:
-        log = RunLog(what, log_args, ai)
+        with timing.span("debug_log_setup"):
+            log = RunLog(what, log_args, ai)
         _set_console(log.dir / "console.log")
         to_console("INFO", f"run log: {log.dir}")
-        bag = _start_bag(log.dir)
+        bag = timing.timed("debug_bag_start")(_start_bag)(log.dir)
         log.frame(f"{what}_start")
         ok = task()
         log.event(what, ok=ok)
@@ -107,8 +109,8 @@ def logged_run(what, ai, log_args, speed, task, *, fast=False):
         rammp_arm.CART_SPEED, rammp_arm.JOINT_SPEED, rammp_arm.GO_TO_SPEED_SCALE = saved
         rammp_arm.CONTACT_CART_SPEED, rammp_arm.CONTACT_JOINT_SPEED = saved_contact
         if log is not None:
-            log.close(ok)
-        _stop_bag(bag)
+            timing.timed("debug_log_close")(log.close)(ok)
+        timing.timed("debug_bag_stop")(_stop_bag)(bag)
         _set_console(None)
 
 

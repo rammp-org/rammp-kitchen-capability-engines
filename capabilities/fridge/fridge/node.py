@@ -42,6 +42,7 @@ from capability_engine import Action, BaseError, Cancelled, CapabilityEngine, En
 from capability_ui import RunUI, cancel_own_run
 from door_common import common as dc
 from door_common import open_door as shared_open
+from door_common import timing
 
 from . import arrival, base_drive, close_door, constants, docking, motion, open_door, push_open, relocalize, ui_text
 from .door_sweep import SweepBlocked
@@ -144,6 +145,8 @@ PARAMS = {
     "docking_max_linear_speed": 0.05,
     "docking_max_yaw_speed": 0.12,
     "docking_enabled": False,  # fixture A / Gen1.5, after verifying the route and odometry datum on hardware
+    "open_timing_enabled": False,
+    "open_early_empty_view_switch": False,
     "open_wrist_relook_enabled": False,  # alternate wrist motion needs calibrated scene geometry
     "open_scene_fallback_enabled": False,  # retry a refused fixed-base wrist look on the scene camera
     "guided_docking_enabled": False,  # show checked drive steps on the Open UI buttons
@@ -302,6 +305,7 @@ class Capability(CapabilityEngine):
             self.cfg["door_normal"],
             self.cfg["grasp"],
             hinge_side=self.cfg["hinge_side"],
+            early_empty_view_switch=self.cfg["open_early_empty_view_switch"],
             **{k: self.cfg[k] for k in constants.MEASURED},
         )
         if self.cfg["handle_source"] not in ("depth", "sam3"):
@@ -829,6 +833,18 @@ class Capability(CapabilityEngine):
         return detected if autonomous else confirm(detected)
 
     def _execute(self, action_id, params, ctx):
+        if action_id != "open" or not self.cfg.get("open_timing_enabled", False):
+            return self._execute_action(action_id, params, ctx)
+        with timing.record() as trace:
+            try:
+                result = self._execute_action(action_id, params, ctx)
+            except EngineError as error:
+                error.payload = {**(error.payload or {}), "timing": trace.diagnostics()}
+                raise
+            result["timing"] = trace.diagnostics()
+            return result
+
+    def _execute_action(self, action_id, params, ctx):
         self._drove = False  # whether this goal has driven the wheelchair (drive_base)
         self._guided = False
         profile = params.get("profile", "standard") if action_id == "open" else "standard"

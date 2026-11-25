@@ -28,6 +28,7 @@ chair_moved then pushes (push_after_chair_move).
 from dataclasses import replace
 
 import numpy as np
+from door_common import timing
 from door_common.common import DoorFrame, Refused, save_door_geometry, say
 from scipy.spatial.transform import Rotation as R
 
@@ -450,6 +451,7 @@ class PushOpen:
         self.end_deg = None
         self.release_geometry = None
 
+    @timing.timed("push_route_guard")
     def safe_routes(self, model, world, deg0, *, in_place):
         boxes, padding = world.door_sweep_boxes()
         minimum = push_minimum(deg0)
@@ -607,7 +609,8 @@ class PushOpen:
             and np.max(np.linalg.norm(release_geometry(model, deg0) - self.release_geometry, axis=1))
             <= F.PUSH_RELEASE_REUSE_M
         )
-        say(f"  {after_release(self, planner, ai, door, reuse=reuse)}")
+        with timing.span("reentry_plan"):
+            say(f"  {after_release(self, planner, ai, door, reuse=reuse)}")
         planner.join(self.motion, FridgeModel(door).cabinet())
         if not self.chair_move:
             ok = planner.run(self.motion, "off the handle + round the door + push-open", impedance=AFTER_RELEASE)
@@ -642,6 +645,7 @@ class PushOpen:
 AFTER_RELEASE = {**F.PULL_GAINS, "path_tol": F.AFTER_RELEASE_PATH_TOL_RAD}  # everything after the release: compliant
 
 
+@timing.timed("release")
 def _release(ai, *, early=False):
     """Open the gripper, slowly, the hand still (the swing has stopped at its angle). Refused if the gripper's own
     reported position (its joint state, not a camera) still says closed after the command: backing off then would drag

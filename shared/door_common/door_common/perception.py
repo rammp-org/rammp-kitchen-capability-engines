@@ -41,6 +41,7 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from scipy.spatial.transform import Rotation as R
 
+from . import timing
 from .common import say
 
 TF_TIMEOUT_S = 2.0  # wait this long for base <- camera at the frame's stamp, then use the latest
@@ -200,33 +201,37 @@ class WristCamera:
         without a service, a reply, or that frame still buffered. ([], frame) for a synchronized empty reply."""
         if self._sam3 is None:
             return [], None
-        if not self._sam3.wait_for_service(timeout_sec=2.0):
+        with timing.span("sam3_service_wait"):
+            service_ready = self._sam3.wait_for_service(timeout_sec=2.0)
+        if not service_ready:
             say(f"  no SAM 3 service {self._sam3.srv_name} (is the sam3 node up?)")
             return [], None
         req = self._sam3.srv_type.Request(
             prompts=self.sam3_prompts, image_topic=self.color_topic, score_threshold=float(self.sam3_threshold)
         )
-        done, fut = threading.Event(), self._sam3.call_async(req)
-        fut.add_done_callback(lambda _: done.set())
-        deadline = time.monotonic() + SAM3_TIMEOUT_S
-        try:
-            while not done.is_set():
-                if self._checkpoint is not None:
-                    self._checkpoint()
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    say(f"  SAM 3 did not answer in {SAM3_TIMEOUT_S:g} s")
-                    return [], None
-                done.wait(min(0.1, left))
-        finally:
-            if not done.is_set():
-                fut.cancel()
-        resp = fut.result()
+        with timing.span("sam3"):
+            done, fut = threading.Event(), self._sam3.call_async(req)
+            fut.add_done_callback(lambda _: done.set())
+            deadline = time.monotonic() + SAM3_TIMEOUT_S
+            try:
+                while not done.is_set():
+                    if self._checkpoint is not None:
+                        self._checkpoint()
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        say(f"  SAM 3 did not answer in {SAM3_TIMEOUT_S:g} s")
+                        return [], None
+                    done.wait(min(0.1, left))
+            finally:
+                if not done.is_set():
+                    fut.cancel()
+            resp = fut.result()
         if not resp.success:
             say(f"  SAM 3: {resp.message}")
             return [], None
         objs = sorted((o for o in resp.detections.objects if o.mask_id > 0), key=lambda o: -o.score)
-        frame = self.frame_at(resp.detections.header.stamp)
+        with timing.span("capture"):
+            frame = self.frame_at(resp.detections.header.stamp)
         if frame is None:
             stamp = _stamp_s(resp.detections.header.stamp)
             say(f"  SAM 3's image ({stamp:.3f}) is not among the buffered RGB-D frames (dropped by the sync, or old)")
@@ -305,6 +310,7 @@ class WristCamera:
             return m
         return None
 
+    @timing.timed("capture")
     def grab(self, timeout_s=10.0):
         """The latest frame: {rgb (bgr8), depth_mm (float32), K (3x3), base_T_cam (4x4 or None), time,
         frame_id, box (appliance_box(), or None without a box_topic)}. Raises RuntimeError if no frame has come in

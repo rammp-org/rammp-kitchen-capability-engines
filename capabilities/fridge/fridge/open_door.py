@@ -39,10 +39,12 @@ Refusals raise door_common.common.Refused: the arm holds where it is.
 """
 
 import json
+import os
 import threading
 import time
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from functools import partial
 from itertools import chain
 from threading import Event
@@ -51,6 +53,7 @@ import numpy as np
 import rammp_arm
 from door_common import common as dc
 from door_common import open_door as shared
+from door_common import timing
 from door_common.common import Refused, quiet, save_door_geometry, say
 from scipy.spatial.transform import Rotation as R
 
@@ -253,7 +256,19 @@ _HANDLE_LENGTH = F.MEASURED["handle_length_m"]  # configure sets these two
 _DOOR_Z_FROM_HANDLE = (-F.MEASURED["door_below_handle_m"], F.MEASURED["door_above_handle_m"])
 
 
-def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", grasp="auto", *, hinge_side="left", **measured):
+EARLY_EMPTY_ATTEMPTS = 3
+
+
+def configure(
+    data_dir,
+    mount_tilt_deg=0,
+    door_normal="handle_model",
+    grasp="auto",
+    *,
+    hinge_side="left",
+    early_empty_view_switch=False,
+    **measured,
+):
     """Everything the detection and the door model need from the fridge: call once at startup. `mount_tilt_deg`: a key
     of constants.MOUNTS. `door_normal`: how each look measures the door's direction (_make_detector, DOOR_NORMALS;
     handle_model and handle need SAM 3's mask). `grasp`: constants.GRASPS. `measured`: constants.MEASURED's names."""
@@ -309,6 +324,9 @@ def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", grasp="aut
         DOOR_FACE_BEHIND_HANDLE=m["handle_centre_to_face_m"],
         DOOR_Z_FROM_HANDLE=_DOOR_Z_FROM_HANDLE,  # the camera sees only part of it
         KEEP_ARM_IN_FRAMES=True,
+        EARLY_EMPTY_ATTEMPTS=(
+            EARLY_EMPTY_ATTEMPTS if early_empty_view_switch and os.getenv("FRIDGE_LEGACY_LOOK_RETRIES") != "1" else None
+        ),
     )
 
 
@@ -611,6 +629,7 @@ def proven_file():
     return dc.DOOR_FILE.parent / proven.FILE_NAME
 
 
+@timing.timed("debug_proven")
 def record_proven(plan, geom, source):
     """Record `plan`'s grasp as one that worked (`source`: "plan" or "arm"), for the next search to try first."""
     err = proven.record(
@@ -1165,6 +1184,7 @@ def why_not(tried):
 LAST_PLAN = None  # the last plan_open's plan (+ geom), e.g. to save a dry run's door
 
 
+@timing.timed("detect")
 def detect(ai, *, for_docking=False):
     """door_common's detection and the measured hinge: the geometry dict plan_open takes, and the placement advice."""
     st = ai.get_state()
@@ -1193,6 +1213,7 @@ def detect(ai, *, for_docking=False):
     return geom, q0
 
 
+@timing.timed("wrist_relook")
 def detect_with_wrist_relook(ai, planner, camera, scene_model):
     """Search for the vertical bar from two collision-checked viewpoints after an empty wrist look."""
     try:
@@ -1240,6 +1261,7 @@ def detect_with_wrist_relook(ai, planner, camera, scene_model):
         raise shared.NoHandleProposal(f"{first}; the checked wrist re-looks had no usable proposal.") from first
 
 
+@timing.timed("raised_relook")
 def detect_after_arrival_relook(ai, planner, camera, obstacles):
     """Take raised wrist views and return to the parked arm before any further drive."""
     original = ai.get_state()
@@ -1299,6 +1321,7 @@ class GraspUnconfirmed(Refused):
     """The fingers did not stop at the expected handle width."""
 
 
+@timing.timed("grasp_close")
 def confirm_grasp(ai):
     if ai.gripper(1.0, force=F.GRASP_FORCE) is False:
         raise Refused("Gripper close did not complete. Check whether the hand is on the handle.")
@@ -1320,6 +1343,7 @@ def confirm_grasp(ai):
         )
 
 
+@timing.timed("grasp_retry_view")
 def retry_grasp_view(ai, planner, plan):
     """Retreat through the insertion corridor and return to the original viewing pose."""
     approach = plan["approach"]
@@ -1413,7 +1437,7 @@ def execute_open(ai, planner, plan, *, fast=False):
     if sw.joined is None:
         planner.join(sw, model.cabinet())
     if hook:
-        if ai.gripper(HOOK_CLOSURE, force=HOOK_FORCE) is False:
+        if timing.timed("hook_close")(ai.gripper)(HOOK_CLOSURE, force=HOOK_FORCE) is False:
             raise Refused("Could not close to the hook position.")
         grip = ai.gripper_state() if hasattr(ai, "gripper_state") else None
         position = float(grip.position if grip is not None else ai.get_state()["gripper_pos"])
@@ -1746,6 +1770,7 @@ def _predictive_dock(detect_at_dock, planner, make_after, swing, staging, adapti
             raise Refused("The dock look is ready")
         planner.checkpoint()
 
+    @timing.timed("speculative_preflight")
     def preview(geom, joints, delta, yaw, mount, route):
         inverse = R.from_rotvec([0, 0, -yaw])
 
@@ -1766,7 +1791,9 @@ def _predictive_dock(detect_at_dock, planner, make_after, swing, staging, adapti
             if route and hasattr(planner.arm, "stream"):
                 speculative.deadline = time.monotonic() + 1.5
                 try:
-                    motion = dock_ready.plan_ready(speculative, geom, predicted, joints, route, mount)
+                    motion = timing.timed("ready_arm_plan")(dock_ready.plan_ready)(
+                        speculative, geom, predicted, joints, route, mount
+                    )
                     if motion is not None:
                         ready.set_result(motion)
                 except (Refused, ArmError, ValueError) as error:
@@ -1784,7 +1811,7 @@ def _predictive_dock(detect_at_dock, planner, make_after, swing, staging, adapti
     def on_route(*args):
         nonlocal future
         if future is None:
-            future = pool.submit(preview, *args)
+            future = pool.submit(copy_context().run, preview, *args)
             return lambda: ready.result() if ready.done() else None
 
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1852,6 +1879,7 @@ def run(
     if fast:
         planner.feedback_settle = True
 
+    @timing.timed("open_task")
     def task():
         global LAST_PLAN
         if release_only:
@@ -1894,11 +1922,12 @@ def run(
             geom, q0, prediction = _predictive_dock(detect_at_dock, planner, make_after, swing, staging, adaptive_pull)
         else:
             detect_initial = detect_at_dock or detect_at_start or partial(detect, ai)
-            geom, q0 = detect_initial()
+            with timing.span("initial_observation"):
+                geom, q0 = detect_initial()
         h, n = geom["h_raw"], geom["n"]
         start = f"Start joints {np.round(np.degrees(q0), 1)}."
         try:
-            plan = _select_open_plan(
+            plan = timing.timed("final_preflight")(_select_open_plan)(
                 planner,
                 geom,
                 q0,
@@ -1953,7 +1982,7 @@ def run(
                 save_planned_door(plan, push and not plan["cand"].get("hook"), after)
             return True
         try:
-            swung = execute_open(ai, planner, plan, fast=fast)
+            swung = timing.timed("approach_and_pull")(execute_open)(ai, planner, plan, fast=fast)
         except GraspUnconfirmed as first:
             say(f"  {first} Taking one new wrist look before trying again.")
             retry_grasp_view(ai, planner, plan)
@@ -1964,12 +1993,14 @@ def run(
             geom = dict(geom, grasp_retry=True)
             after = make_after()
             try:
-                plan = plan_open(planner, geom, q0, swing, after, staging=staging, adaptive_pull=adaptive_pull)
+                plan = timing.timed("retry_preflight")(plan_open)(
+                    planner, geom, q0, swing, after, staging=staging, adaptive_pull=adaptive_pull
+                )
             except Refused as error:
                 raise Refused(f"{first} Could not plan a new grasp after retreating: {error}") from error
             plan.update(after=after, hinge_fields=geom["hinge_fields"], door_mid=geom["door_mid"])
             LAST_PLAN = dict(plan, geom=geom, q0=q0)
-            swung = execute_open(ai, planner, plan, fast=fast)
+            swung = timing.timed("approach_and_pull")(execute_open)(ai, planner, plan, fast=fast)
         if not swung:
             if plan["cand"].get("hook"):
                 say("Hook stopped in place. Check the door position and grip before commanding motion.")
@@ -1987,7 +2018,7 @@ def run(
             return False
         if not plan["cand"].get("hook"):
             record_proven(plan, geom, "arm")  # the swing finished on the arm: tried before ones that only planned
-        ok = after.execute(ai, planner, drive_chair)
+        ok = timing.timed("post_pull")(after.execute)(ai, planner, drive_chair)
         if ok and plan["cand"].get("hook"):
             P.FINAL_ANGLE_DEG = float(load_door()["door_open_deg"])
         return ok

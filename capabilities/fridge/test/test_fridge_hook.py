@@ -104,6 +104,7 @@ def test_failed_hook_skips_release_and_withdrawal(swing_ok, end_closure):
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "execute_open")
     push = Mock()
     scope = dict(
+        timing=SimpleNamespace(timed=lambda _name: lambda fn: fn),
         np=np,
         F=SimpleNamespace(GRIP_DURING_SWING=True, PULL_GAINS={}, PULL_PATH_TOL_RAD=0.15, SWING_END_TOL_M=0.03),
         pl=SimpleNamespace(_short_delta=lambda a, b: np.asarray(b) - np.asarray(a)),

@@ -27,6 +27,8 @@ from capability_engine import sim
 from capability_engine.cornell_commands import CloseGripperCommand, OpenGripperCommand
 from scipy.spatial.transform import Rotation as R
 
+from door_common import timing
+
 from . import common as dc
 from .common import (
     ARM,
@@ -55,6 +57,7 @@ from .common import (
 
 # --- detection ---
 MAX_LOOKS = 5  # keep looking until two detections agree within DETECT_AGREE
+EARLY_EMPTY_ATTEMPTS = None  # opt in per capability
 MAX_EMPTY_RETRIES = 8  # per look: retries on an empty read (viewpoint-dependent YOLO misses)
 DETECT_AGREE = 0.03
 HINGE_AGREE = 0.03  # the two agreeing looks' hinges must agree this well too (horizontal)
@@ -316,6 +319,7 @@ def _check_arc(scene, rb, wps, q0):
 FRAME_ARM = None  # KEEP_ARM_IN_FRAMES: the arm, so each saved detection frame also keeps its joints + tool pose
 
 
+@timing.timed("debug_frame")
 def _save_frame(frame, tag, attempt, det):
     """Keep every detection's colour + depth frame (and the result) for looking at misses afterwards: real
     depth (uint16 mm), K and the camera pose (common.save_frame). Until 10-21 the depth was written
@@ -352,13 +356,16 @@ class NoHandleProposal(Refused):
     """SAM 3 returned a synchronized frame with zero instances on every attempt."""
 
 
+@timing.timed("agreement")
 def detect_handle():
     """Two agreeing looks. Returns (handle position, handle orientation, door normal, door_z, door_mid, hinge)."""
     cam = dc.camera()
-    if not cam.wait_for_frames(30.0):
-        raise Refused("No RGB-D frames")
+    with timing.span("wait_for_rgbd"):
+        if not cam.wait_for_frames(30.0):
+            raise Refused("No RGB-D frames")
     detector = MAKE_DETECTOR()
 
+    @timing.timed("look")
     def look(tag):
         empty_proposals = 0
         for attempt in range(1, MAX_EMPTY_RETRIES + 1):
@@ -366,20 +373,24 @@ def detect_handle():
             instances = None
             if HANDLE_SOURCE == "sam3" and hasattr(cam, "sam3_detect"):
                 # SAM 3 segments the newest image when asked: detect on that very frame (its depth, its camera pose)
-                instances, f = cam.sam3_detect()
+                with timing.span("sam3_capture"):
+                    instances, f = cam.sam3_detect()
                 if f is not None and not instances:
                     empty_proposals += 1
                 if f is None:
                     say(f"  no SAM 3 mask with its RGB-D frame on look {tag} (retry {attempt}/{MAX_EMPTY_RETRIES})")
                     if attempt < MAX_EMPTY_RETRIES:
-                        time.sleep(0.5)
+                        with timing.span("retry_sleep"):
+                            time.sleep(0.5)
                     continue
             else:
-                f = cam.grab()
+                with timing.span("capture"):
+                    f = cam.grab()
             if getattr(cam, "box_topic", "") and f["box"] is None:
                 det = None  # boxer has no usable microwave box yet (grab said why): retry, never YOLO instead
             elif instances is not None and hasattr(detector, "detect_instances"):
-                det, f["handle_mask"] = detector.detect_instances(instances, f)
+                with timing.span("fit"):
+                    det, f["handle_mask"] = detector.detect_instances(instances, f)
             else:
                 # handle_source "sam3": SAM 3 masks the handle on the wrist image (the door still comes from depth).
                 # A detector with pick_handle_mask chooses among SAM 3's instances (with the frame: its depth); else the
@@ -400,7 +411,7 @@ def detect_handle():
                 det = (
                     None
                     if HANDLE_SOURCE == "sam3" and mask is None
-                    else detector.detect(
+                    else timing.timed("fit")(detector.detect)(
                         f["rgb"], f["K"], f["depth_mm"], f["base_T_cam"], box=f.get("box"), handle_mask=mask
                     )
                 )
@@ -408,8 +419,11 @@ def detect_handle():
             if det is not None:
                 break
             say(f"  no detection on look {tag} (retry {attempt}/{MAX_EMPTY_RETRIES})")
+            if tag == "1" and EARLY_EMPTY_ATTEMPTS == attempt == empty_proposals:
+                raise NoHandleProposal(f"NO DETECTION ({tag}) after {attempt} synchronized empty SAM 3 replies")
             if attempt < MAX_EMPTY_RETRIES:
-                time.sleep(0.5)
+                with timing.span("retry_sleep"):
+                    time.sleep(0.5)
         else:
             why = getattr(detector, "last_miss", "")
             error = NoHandleProposal if tag == "1" and empty_proposals == MAX_EMPTY_RETRIES else Refused

@@ -710,3 +710,34 @@ def test_the_handle_models_fit_refuses_rather_than_guess():
     mask[100:110, 300:305] = True  # a few pixels: too little of the handle
     with pytest.raises(dn.DoorNormalError, match="handle points with depth"):
         dn.measure_door_normal(np.full((400, 640), 700.0, np.float32), CAM_K, CAM_T, mask)
+
+
+@pytest.mark.parametrize(
+    ("early", "missing_first", "expected"), [(3, False, 3), (None, False, 8), (3, True, 8)]
+)
+def test_only_synchronized_empty_first_looks_use_the_early_retry_cap(
+    monkeypatch, early, missing_first, expected
+):
+    from types import SimpleNamespace
+
+    frame = {}
+    replies = iter([[[], None]] * missing_first + [[[], frame]] * expected)
+    camera = SimpleNamespace(
+        wait_for_frames=lambda _: True, sam3_detect=MagicMock(side_effect=lambda: next(replies))
+    )
+    detector = SimpleNamespace(detect_instances=lambda _instances, _frame: (None, None))
+    sleep = MagicMock()
+    monkeypatch.setattr(dc, "camera", lambda: camera)
+    monkeypatch.setattr(shared, "MAKE_DETECTOR", lambda: detector)
+    monkeypatch.setattr(shared, "HANDLE_SOURCE", "sam3")
+    monkeypatch.setattr(shared, "EARLY_EMPTY_ATTEMPTS", early)
+    monkeypatch.setattr(shared, "_save_frame", lambda *_: None)
+    monkeypatch.setattr(shared, "_checkpoint", lambda: None)
+    monkeypatch.setattr(shared.time, "sleep", sleep)
+
+    error = dc.Refused if missing_first else shared.NoHandleProposal
+    with pytest.raises(error) as caught:
+        shared.detect_handle()
+    assert type(caught.value) is error
+    assert camera.sam3_detect.call_count == expected
+    assert sleep.call_count == expected - 1

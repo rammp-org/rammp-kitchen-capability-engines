@@ -61,6 +61,8 @@ from capability_engine.sim import (  # noqa: F401 -- re-exported for the task mo
 )
 from scipy.spatial.transform import Rotation as R
 
+from door_common import timing
+
 
 def clearance(rb, q, bodies, closed=False, held=None):
     """capability_engine.sim.clearance (the smallest distance from any arm link to `bodies` at joints `q`, gripper open
@@ -940,6 +942,7 @@ def door_dims(door):
     )
 
 
+@timing.timed("door_geometry_write")
 def save_door_geometry(door_file=None, **kw):
     """Merge door facts into `door_file` (default DOOR_FILE): closed_normal / closed_grasp_pos (grasp), hinge
     (swing)."""
@@ -1310,6 +1313,7 @@ def grab_frames(n=1, gap_s=0.3):
     return frames
 
 
+@timing.timed("frame_write")
 def save_frame(frame, tag, out_dir, result=None, arm_state=None):
     """<time>_<tag>: _rgb.jpg + .npz (uint16 depth mm, K, base_T_cam, arm joints/tool pose if given) +
     _result.json. ~0.3 MB a frame. Returns the path stem (None if it could not save)."""
@@ -1401,6 +1405,7 @@ class RunLog:
         self.event("start", arm=start)
         say(f"run log: {self.dir}")
 
+    @timing.timed("debug_log_write")
     def event(self, kind, **kw):
         self.data["events"].append({"t": round(time.time() - self.t0, 3), "kind": kind, **_jsonable(kw)})
         try:
@@ -1408,6 +1413,7 @@ class RunLog:
         except Exception as e:
             say(f"  (run log: could not write run.json: {e})")
 
+    @timing.timed("debug_capture")
     def frame(self, tag):
         """One RGB-D frame from the wrist camera, saved here with the arm's state (camera read only)."""
         try:

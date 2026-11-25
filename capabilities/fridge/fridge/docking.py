@@ -10,6 +10,7 @@ import numpy as np
 import yaml
 from capability_engine import BaseError, StateTimeout
 from capability_engine.sim import SimModelError
+from door_common import timing
 from door_common.common import Refused
 
 from . import arrival, base_drive
@@ -72,6 +73,7 @@ def route_options(delta, yaw):
             yield ((-retreat, 0.0), *legs(remaining, yaw, other_direction=other_direction))
 
 
+@timing.timed("route_selection")
 def checked_route(delta, yaw, remaining_d, remaining_yaw, geom, guard, *, detour=False, max_leg=math.inf):
     blocked = None
     for route in guided_routes(delta, yaw, detour=detour):
@@ -80,7 +82,8 @@ def checked_route(delta, yaw, remaining_d, remaining_yaw, geom, guard, *, detour
         if travel > remaining_d or turning > remaining_yaw or any(abs(d) > max_leg for d, _ in route):
             continue
         try:
-            guard(geom, route)
+            with timing.span("route_guard"):
+                guard(geom, route)
         except Refused as error:
             blocked = blocked or error
         else:
@@ -106,6 +109,7 @@ def _sample(base):
     return pose, abs(twist.linear.x), abs(twist.angular.z)
 
 
+@timing.timed("base_leg")
 def _drive_leg(base, arm, ctx, distance, angle, speed, yaw_speed, odom_to_axle, deadline, clock, sleep, step=None):
     turning = angle != 0.0
     goal = angle if turning else distance
@@ -172,6 +176,7 @@ def _drive_leg(base, arm, ctx, distance, angle, speed, yaw_speed, odom_to_axle, 
         raise BaseError("Wheelchair settled outside the checked segment endpoint")
 
 
+@timing.timed("stationary_look")
 def stationary_look(base, arm, look, odom_to_axle, *, mode_entered):
     before, v, w = _sample(base)
     if v > LINEAR_SETTLED or w > ANGULAR_SETTLED:
@@ -200,6 +205,7 @@ def stationary_look(base, arm, look, odom_to_axle, *, mode_entered):
             base.stop()
 
 
+@timing.timed("wrist_confirmation")
 def confirm_wrist(base, arm, scene, look, odom_to_axle, *, mode_entered):
     """Read a stationary wrist pose and check its agreement with the scene dock."""
     wrist = stationary_look(base, arm, look, odom_to_axle, mode_entered=mode_entered)
@@ -211,6 +217,7 @@ def confirm_wrist(base, arm, scene, look, odom_to_axle, *, mode_entered):
     return wrist
 
 
+@timing.timed("dock")
 def dock(
     base,
     arm,
@@ -246,6 +253,7 @@ def dock(
     entered = False
     ready = None
 
+    @timing.timed("ready_arm_park")
     def park_ready():
         nonlocal ready
         parked_at, _, _ = _sample(base)
@@ -271,7 +279,8 @@ def dock(
     if arrival_check is not None:
         ctx.checkpoint()
         parked = np.asarray(arm.joint_states().position, float)
-        back = stationary_look(base, arm, arrival_check, odom_to_axle, mode_entered=False)
+        with timing.span("arrival_depth_guard"):
+            back = stationary_look(base, arm, arrival_check, odom_to_axle, mode_entered=False)
         if back:
             if not math.isfinite(back) or not 0 < back <= min(arrival.MAX_REVERSE_M, cfg["base_max_distance"]):
                 raise Refused(arrival.REPARK)
@@ -362,7 +371,10 @@ def dock(
                         and abs(wrap(actual_yaw - expected_yaw)) <= TURN_TOL
                     ):
                         ready = candidate
-            with ready.follow(clock) if ready is not None else nullcontext() as step:
+            with (
+                timing.span("ready_arm_base_overlap") if ready is not None else nullcontext(),
+                ready.follow(clock) if ready is not None else nullcontext() as step,
+            ):
                 _drive_leg(base, arm, ctx, d, a, speed, yaw_speed, odom_to_axle, deadline, clock, sleep, step)
         remaining_d -= distance
         remaining_yaw -= rotation_travel
@@ -427,6 +439,7 @@ def guided_routes(delta, yaw, *, detour=False):
         )
 
 
+@timing.timed("guided_route_selection")
 def guided_step(delta, yaw, geom, guard):
     """Ask for only one short segment, with an allowance for human overshoot."""
 
@@ -448,7 +461,8 @@ def guided_step(delta, yaw, geom, guard):
         far_distance = distance + math.copysign(GUIDED_POSITION_MARGIN, distance) if distance else 0.0
         far_turn = turn + math.copysign(GUIDED_YAW_MARGIN, turn) if turn else 0.0
         try:
-            guard(geom, ((far_distance, far_turn),))
+            with timing.span("route_guard"):
+                guard(geom, ((far_distance, far_turn),))
         except Refused as error:
             blocked = blocked or error
         else:
@@ -456,6 +470,7 @@ def guided_step(delta, yaw, geom, guard):
     raise Refused("No checked small wheelchair move is available. Stop and repark the chair.") from blocked
 
 
+@timing.timed("user_drive_wait")
 def _await_guided_step(base, arm, ctx, start, step, odom_to_axle, deadline, clock, sleep):
     distance, turn = step
     stopped_since = None
@@ -486,6 +501,7 @@ def _await_guided_step(base, arm, ctx, start, step, odom_to_axle, deadline, cloc
     raise Refused("Stop the wheelchair. Guided docking timed out.")
 
 
+@timing.timed("guided_dock")
 def guide(
     base,
     arm,

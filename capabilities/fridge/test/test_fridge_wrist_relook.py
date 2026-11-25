@@ -26,6 +26,7 @@ def _relook(detect):
     )
     scope = dict(
         detect=detect,
+        timing=SimpleNamespace(timed=lambda _name: lambda fn: fn),
         shared=SimpleNamespace(NoHandleProposal=NoHandleProposal),
         Refused=Refused,
         np=np,

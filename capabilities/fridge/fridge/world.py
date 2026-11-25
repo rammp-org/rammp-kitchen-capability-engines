@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+from door_common import timing
 from door_common.common import DoorFrame, Refused, door_dims, say
 from scipy.spatial.transform import Rotation as R
 
@@ -252,6 +253,7 @@ class PlannerWorld:
             self._budget_settings = dict(budget=budget, reserved=reserved, padding=padding)
         return self._budget_settings
 
+    @timing.timed("world_push")
     def push(self, obstacles, label, *, deadline=None):
         """Make `obstacles` (+ `extra`) the planner's world. Nothing is sent if it holds exactly these already.
         Raises Refused if the planner refuses it."""
@@ -288,6 +290,7 @@ class PlannerWorld:
         self.pushes += 1
         self.push_s += time.monotonic() - t0
 
+    @timing.timed("world_restore")
     def restore(self):
         """Put the robot's own world back (also after a cancel). Says so if the planner refuses it."""
         if not self.restore_needed:

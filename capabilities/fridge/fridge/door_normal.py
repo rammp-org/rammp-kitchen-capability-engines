@@ -36,6 +36,7 @@ import os
 from dataclasses import dataclass, field
 
 import numpy as np
+from door_common import timing
 
 DEPTH_RANGE_M = (0.05, 2.0)  # as door_common.perception.DEPTH_RANGE_M
 ROWS_TRIM = 0.15  # the mask's rows used: all but this fraction at its top and bottom (the bar's legs, their bends)
@@ -476,6 +477,7 @@ def _icp(P, cam, R, t, model, iters, footprint_from, fixed_yaw=False):
     return R, t, cost, on
 
 
+@timing.timed("stl_fit")
 def measure_door_normal(
     depth_mm, K, base_T_cam, handle_mask, stl_path=HANDLE_STL, prev=None, *, door_standoff_m=None, hinge_direction=1
 ):

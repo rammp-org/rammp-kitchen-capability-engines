@@ -26,6 +26,7 @@ from functools import partial
 import numpy as np
 import rammp_arm
 from capability_engine.driver_state import Refused as ArmRefused
+from door_common import timing
 from door_common.common import Refused, say
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.transform import Slerp
@@ -214,6 +215,7 @@ class Planner:
     def request_kwargs(self):
         return {} if self.deadline is None else {"deadline": self.deadline}
 
+    @timing.timed("world_update")
     def push_world(self, obstacles, label):
         self.check_deadline()
         try:
@@ -233,6 +235,7 @@ class Planner:
         if self.budget_s is not None and time.monotonic() - self.search_t0 > self.budget_s:
             raise OverBudget(f"planning took longer than its {self.budget_s:.0f} s budget ({self.plans} plans)")
 
+    @timing.timed("planner_request")
     def _ask(self, request, label):
         """cuRobo's answer to `request()` (a plan or a blend: .success, .message), asked again while the planner is busy
         with another client (BUSY_RETRIES), then PlannerBusy: a busy answer is not "no plan"."""
@@ -496,6 +499,7 @@ class Planner:
             start = end + 1
         return ""
 
+    @timing.timed("motion_plan")
     def motion(self, goals, q0, start_pose=None, from_arm=False):
         """Plan every goal in turn, each from where the last ends. Returns (Motion, None) or (None, why). `from_arm`:
         `q0` is where the arm is (leg's)."""
@@ -511,6 +515,7 @@ class Planner:
             pose = (goal.pos, goal.quat)
         return Motion(done, legs, np.asarray(q0, float)), None
 
+    @timing.timed("blend")
     def join(self, motion, world, world_label="blend", speed=None):
         """cuRobo's blend of `motion`'s legs into one trajectory, against `world` (obstacles every leg's own world
         has, so each leg is valid in it): free legs at GO_TO_SPEED_SCALE (x `speed`), contact legs at CONTACT_SPEED of
@@ -588,6 +593,7 @@ class Planner:
         pos, _ = self.fk.poses(motion.joined.q)
         return float(motion.joined.t[int(np.argmin(np.linalg.norm(pos - np.asarray(point, float), axis=1)))])
 
+    @timing.timed(lambda self, motion, label, *args, **kwargs: f"arm_motion:{label}")
     def run(self, motion, label, impedance=None, events=(), tol=KEYPOINT_TOL_M):
         """Run the joined `motion` (join first). Refuses if the arm has moved since it was planned. `impedance`: run it
         compliant -- the driver's joint impedance with these gains ({kq, zeta, torque_limit}, + path_tol: the tracking

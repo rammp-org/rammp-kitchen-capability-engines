@@ -389,9 +389,12 @@ class DriveFlow(Flow):
         scope = load(
             NODE,
             UI_NAMES,
-            UI_METHODS | {"execute", "_execute"},
+            UI_METHODS | {"execute", "_execute", "_execute_action"},
             **{k: v for k, v in self.scope.items() if k != "__builtins__"},
         )
+        from door_common import timing
+
+        scope["timing"] = timing
         scope["constants"].CLOSE_SPEED, scope["constants"].PLAN_BUDGET_S = 0.7, 1.0
         scope.update(
             base_drive=types.SimpleNamespace(
