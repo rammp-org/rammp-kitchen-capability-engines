@@ -397,6 +397,14 @@ def guided_routes(delta, yaw, *, detour=False):
             remaining = delta + np.array([retreat, 0])
             for reverse in (False, True):
                 yield ((-retreat, 0.0), *legs(remaining, yaw, other_direction=reverse))
+        # Resolve the translation along the initial and final headings.
+        # Backing before turning keeps the parked arm clear on close arrivals.
+        forward = rotation(yaw)[:, 0]
+        if abs(forward[1]) > 0.1:
+            advance = delta[1] / forward[1]
+            retreat = delta[0] - advance * forward[0]
+            if retreat < -TRANSLATION_TOL:
+                yield ((retreat, 0.0), (0.0, yaw), (advance, 0.0))
     # A shallow diagonal followed by a straight correction can make a
     # lateral move without turning the handle out of the cameras.
     along, across = rotation(-yaw) @ delta

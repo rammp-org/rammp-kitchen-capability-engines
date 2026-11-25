@@ -423,3 +423,22 @@ def test_autonomous_dock_uses_shallow_route_when_steep_turns_are_blocked():
     assert position == pytest.approx(displacement)
     assert yaw == pytest.approx(0.0)
     assert distance <= 0.35 and heading <= math.pi
+
+
+def test_raw_dock_can_back_then_turn_directly_to_the_final_heading():
+    yaw = 0.3
+    displacement = np.array([-0.16, 0.0]) + 0.10 * docking.rotation(yaw)[:, 0]
+
+    def guard(_, route):
+        if len(route) != 3 or route[0][0] >= 0 or route[1] != (0.0, yaw):
+            raise Refused("Current approach is blocked")
+
+    route, distance, heading = docking.checked_route(
+        displacement, yaw, 0.35, math.pi, None, guard, detour=True
+    )
+    assert route[0] == pytest.approx((-0.16, 0.0))
+    assert route[2] == pytest.approx((0.10, 0.0))
+    position, final_yaw = list(docking.route_samples(route))[-1]
+    assert position == pytest.approx(displacement)
+    assert final_yaw == pytest.approx(yaw)
+    assert distance <= 0.35 and heading <= math.pi
