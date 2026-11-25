@@ -12,6 +12,7 @@ import tf2_ros
 from rclpy.action import ActionClient
 from rclpy.callback_groups import CallbackGroup
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos_event import SubscriptionEventCallbacks
 from tf2_msgs.msg import TFMessage
 
 TF_QOS = QoSProfile(depth=100)
@@ -85,7 +86,14 @@ class ActionScope:
         node = self._node
         return self._add(
             lambda: node.create_subscription(
-                msg_type, topic, callback, qos_profile, callback_group=self._gate
+                msg_type,
+                topic,
+                callback,
+                qos_profile,
+                callback_group=self._gate,
+                # Humble adds default QoS waitables to the executor outside the
+                # callback gate. They can be destroyed while it builds a wait set.
+                event_callbacks=SubscriptionEventCallbacks(use_default_callbacks=False),
             ),
             node.destroy_subscription,
         )
