@@ -391,32 +391,37 @@ def _fit_door_strip(points, front, toward, standoff_m):
     valid &= normals @ toward[:2] > 0.5 * np.linalg.norm(toward)
     xy = points[:, :2]
     inlier_m = 0.008 * max(1.0, (np.linalg.norm(toward) / FIT_REF_RANGE_M) ** 2)
-    best = np.zeros(len(points), dtype=bool)
+    candidates = []
+    min_support = max(100, 0.25 * len(points))
     for pair, normal in zip(pairs[valid], normals[valid], strict=True):
         inliers = abs((xy - pair[0]) @ normal) < inlier_m
-        if inliers.sum() > best.sum():
-            best = inliers
-    if best.sum() < max(100, 0.25 * len(points)):
-        return None
-    normal, centre, rms = _tls(xy[best])
-    if normal @ toward[:2] < 0:
-        normal = -normal
-    n = np.r_[normal, 0.0]
-    span = np.ptp(np.percentile(xy[best] @ np.array([-normal[1], normal[0]]), [5, 95]))
-    height = np.ptp(np.percentile(points[best, 2], [5, 95]))
-    if height < 0.08 or abs((front[:2] - centre) @ normal - standoff_m) >= 0.025:
-        return None
-    return DoorNormal(
-        n,
-        yaw_deg(n),
-        np.r_[centre, points[best, 2].mean()],
-        int(best.sum()),
-        len(points),
-        rms,
-        span,
-        height,
-        {"front_in": points[best], "front_out": points[~best]},
-    )
+        count = int(inliers.sum())
+        if count >= min_support:
+            candidates.append((count, inliers))
+    # A larger depth cluster can win the raw vote but miss the calibrated
+    # standoff after refitting. Try the remaining measured planes in vote order.
+    for count, inliers in sorted(candidates, key=lambda candidate: -candidate[0]):
+        normal, centre, rms = _tls(xy[inliers])
+        if normal @ toward[:2] < 0:
+            normal = -normal
+        if abs((front[:2] - centre) @ normal - standoff_m) >= 0.025:
+            continue
+        height = np.ptp(np.percentile(points[inliers, 2], [5, 95]))
+        if height < 0.08:
+            continue
+        span = np.ptp(np.percentile(xy[inliers] @ np.array([-normal[1], normal[0]]), [5, 95]))
+        return DoorNormal(
+            np.r_[normal, 0.0],
+            yaw_deg(np.r_[normal, 0.0]),
+            np.r_[centre, points[inliers, 2].mean()],
+            count,
+            len(points),
+            rms,
+            span,
+            height,
+            {"front_in": points[inliers], "front_out": points[~inliers]},
+        )
+    return None
 
 
 def _icp(P, cam, R, t, model, iters, footprint_from, fixed_yaw=False):

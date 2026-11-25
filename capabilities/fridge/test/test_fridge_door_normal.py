@@ -146,3 +146,19 @@ def test_real_wrist_top_proposals_recover_a_rejected_primary(monkeypatch):
     assert not np.array_equal(mask, primary)
     assert detector.last_door_normal.yaw_deg == pytest.approx(10.3, abs=0.6)
     assert detection["handle"] == pytest.approx([0.860, -0.269, 0.337], abs=0.009)
+
+
+def test_real_scene_uses_a_valid_plane_when_the_largest_depth_cluster_fails_standoff():
+    # Nov 16, 234904 scene look 7, with the frozen SAM 3 handle proposal.
+    path = Path(__file__).parent / "fixtures" / "nov16_234904_scene_7.npz"
+    with np.load(path) as frame:
+        fit = dn.measure_door_normal(
+            frame["depth_mm"],
+            frame["K"],
+            frame["base_T_cam"],
+            frame["mask"],
+            door_standoff_m=0.070,
+        )
+    assert fit.normal[0] < 0
+    assert 18 < fit.yaw_deg < 20
+    assert fit.debug["door_surface"].span_m > 0.20
