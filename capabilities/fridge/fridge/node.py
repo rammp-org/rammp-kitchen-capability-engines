@@ -697,7 +697,7 @@ class Capability(CapabilityEngine):
         )
         raw_arrival = not guided and not guided_mark
 
-        def parked_geometry():
+        def parked_joints_and_layers():
             q = np.asarray(self.arm.joint_states().position, float)
             start = np.radians(self.cfg["start_joints_deg"])
             if not np.isfinite(q).all() or _joint_gap_deg(start, q) > constants.START_REACHED_DEG:
@@ -705,18 +705,11 @@ class Capability(CapabilityEngine):
             boxes, padding = world.door_sweep_boxes()
             if not boxes:
                 raise dc.Refused("Docking requires the deployed chair and occupant geometry")
-            if raw_arrival:
-                return boxes, arrival.arm_envelopes(self._fk, q), padding
-            # Conservative axis-aligned envelopes of each link at the verified start.
-            points = np.vstack((np.zeros(3), self._fk.joint_points(q)))
-            arm_boxes = [
-                dict(name=f"arm link {index}", position=(a + b) / 2, dims=np.abs(b - a) + 0.16)
-                for index, (a, b) in enumerate(zip(points[:-1], points[1:], strict=True))
-            ]
-            return boxes, arm_boxes, padding
+            return q, boxes, padding
 
         def check_arrival():
-            boxes, arm_boxes, padding = parked_geometry()
+            q, boxes, padding = parked_joints_and_layers()
+            arm_boxes = arrival.arm_envelopes(self._fk, q)
             scene.require_frames_after_now()
             try:
                 frame = scene.grab()
@@ -747,12 +740,13 @@ class Capability(CapabilityEngine):
             finally:
                 dc.set_camera(camera)
 
+        route_guard = docking.ParkedRouteGuard(
+            world.sweep_config, self.arm.robot_description, self._fk, mount, raw_arrival, self.get_logger().warning
+        )
+
         def guard(geom, route):
-            boxes, arm_boxes, padding = parked_geometry()
-            if raw_arrival:
-                docking.check_raw_route(geom["closed_model"], boxes, arm_boxes, padding, route, mount)
-            else:
-                docking.check_route(geom["closed_model"], [*boxes, *arm_boxes], padding, route, mount)
+            q, boxes, padding = parked_joints_and_layers()
+            route_guard.check(geom["closed_model"], q, boxes, padding, route)
 
         def confirm(detected):
             if camera is scene:

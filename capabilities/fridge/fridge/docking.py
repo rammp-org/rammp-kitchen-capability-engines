@@ -2,15 +2,19 @@
 
 import math
 import time
+import xml.etree.ElementTree as ET
 from contextlib import nullcontext
 from itertools import accumulate
 
 import numpy as np
-from capability_engine import BaseError
+import yaml
+from capability_engine import BaseError, StateTimeout
+from capability_engine.sim import SimModelError
 from door_common.common import Refused
 
 from . import arrival, base_drive
 from .door_sweep import DoorSweep
+from .parked_arm import ParkedArm
 
 # H and inward normal relative to arm_mount at the WS11-E floor mark.
 TARGET_HANDLE = np.array([0.825, -0.235])
@@ -530,12 +534,16 @@ AXLE_TO_MOUNT = (0.11595, 0.284325, 0.50190)
 ODOM_TO_AXLE = (0.0, 0.0)
 
 
+ROUTE_SAMPLE_M = 0.01
+ROUTE_SAMPLE_RAD = math.radians(2)
+
+
 def route_samples(route):
     """Sample the axle trajectory including segment joins and both endpoints."""
     axle, heading = np.zeros(2), 0.0
     yield axle, heading
     for distance, turn in route:
-        steps = max(1, math.ceil(abs(distance) / 0.01), math.ceil(abs(turn) / math.radians(2)))
+        steps = max(1, math.ceil(abs(distance) / ROUTE_SAMPLE_M), math.ceil(abs(turn) / ROUTE_SAMPLE_RAD))
         delta = rotation(heading) @ np.array([distance, 0.0])
         for fraction in np.linspace(0, 1, steps + 1)[1:]:
             yield axle + fraction * delta, heading + fraction * turn
@@ -584,3 +592,127 @@ def check_raw_route(model, chair, arm_boxes, padding, route, axle_to_mount):
     # The arm envelopes are measured against the physical appliance. Apply
     # planner padding and the tracking allowance once to each separation.
     check_route(model, arm_boxes, padding, route, axle_to_mount, tracking_margin=0.035, appliance_padding=0.0)
+
+
+# WS11-H corrected-axle trace maxima: 6.01 mm and 1.24°. WS11-X's H-model
+# runs reach 1.26°. Round up and add the controller's 20 mm / 2° departure
+# allowances plus one command delay at X's 0.15 m/s and 0.30 rad/s.
+ARM_TRACK_XY = 0.034
+ARM_TRACK_YAW = math.radians(4.0)
+# Full repeated-look spreads from G2 and V's Nov 16 real-frame replays.
+FIT_XY = 0.020
+FIT_Z = 0.052
+FIT_YAW_DEG = 10.1
+FIT_YAW_STEPS = 12
+
+
+def _sphere_box_hit(positions, radii, half, centre, frame):
+    local = (positions - centre) @ frame.T
+    gap = np.maximum(np.abs(local) - half, 0)
+    return np.any(np.sum(gap**2, axis=-1) <= radii**2)
+
+
+def check_sphere_route(model, spheres, route, axle_to_mount):
+    """Sweep parked collision spheres against the fitted door, handle, body and support."""
+    spheres = np.asarray(spheres, float)
+    mount = np.asarray(axle_to_mount, float)
+    route = tuple(route)
+    if (
+        spheres.ndim != 2
+        or spheres.shape[1] != 4
+        or not len(spheres)
+        or not np.isfinite(spheres).all()
+        or np.any(spheres[:, 3] <= 0)
+        or mount.shape != (2,)
+        or not np.isfinite(mount).all()
+        or not np.isfinite(route).all()
+    ):
+        raise ValueError("invalid parked arm sweep geometry")
+
+    # route_samples uses <=10 mm and <=2° steps. Inflate by the maximum
+    # travel to the nearest sample and by the tracking envelope at each sphere.
+    axle_centres = spheres[:, :2] + mount
+    reach = np.linalg.norm(axle_centres, axis=1)
+    clearance = (
+        spheres[:, 3] + ARM_TRACK_XY + FIT_XY + ROUTE_SAMPLE_M / 2 + reach * (ARM_TRACK_YAW + ROUTE_SAMPLE_RAD / 2)
+    )
+    samples = list(route_samples(route))
+    swept = np.broadcast_to(spheres[:, :3], (len(samples), len(spheres), 3)).copy()
+    for sample, (axle, heading) in zip(swept, samples, strict=True):
+        sample[:, :2] = axle + axle_centres @ rotation(heading).T - mount
+
+    boxes = model.full(0.0)
+    half, centres, axes = DoorSweep._boxes(boxes)
+    pivot = np.asarray(model.door["closed_handle"], float)[:2]
+    if pivot.shape != (2,) or not np.isfinite(pivot).all():
+        raise ValueError("invalid fitted fridge pivot")
+
+    # The cabinet has a measured floor and height. Other parts can move
+    # with the fitted Z. Move the arm through each inverse fit perturbation.
+    fit_step = (np.linalg.norm(centres[:, :2] - pivot, axis=1) + np.linalg.norm(half[:, :2], axis=1)) * math.radians(
+        FIT_YAW_DEG / FIT_YAW_STEPS
+    )
+    for dims, box in zip(half, boxes, strict=True):
+        if box["name"] != model.prefix + "support_cabinet":
+            dims[2] += FIT_Z
+    for yaw in np.linspace(-FIT_YAW_DEG, FIT_YAW_DEG, FIT_YAW_STEPS + 1):
+        posed = swept.copy()
+        posed[..., :2] = (swept[..., :2] - pivot) @ rotation(math.radians(yaw)) + pivot
+        for box, dims, centre, frame, uncertainty in zip(boxes, half, centres, axes, fit_step, strict=True):
+            if _sphere_box_hit(posed, clearance + uncertainty, dims, centre, frame):
+                raise Refused(f"Docking route blocked by parked arm near {box['name']}. Repark the chair.")
+
+
+class ParkedRouteGuard:
+    """Use deployed collision spheres when available, with the previous guard as a fail-safe."""
+
+    def __init__(self, planner_config, robot_description, fk, mount, raw_arrival, warn):
+        self.planner_config = planner_config
+        self.robot_description = robot_description
+        self.fk = fk
+        self.mount = mount
+        self.raw_arrival = raw_arrival
+        self.warn = warn
+        self.arm = None
+        self.unavailable = False
+
+    def check(self, model, q, chair, padding, route):
+        if not self.unavailable:
+            try:
+                if self.arm is None:
+                    self.arm = ParkedArm(self.planner_config, self.robot_description())
+                spheres = self.arm.spheres(q)
+                # The arm and chair share a rigid frame during the route.
+                # Check their relative clearance once with the layer padding.
+                if chair:
+                    half, centres, axes = DoorSweep._boxes(chair)
+                    for box, dims, centre, frame in zip(chair, half, centres, axes, strict=True):
+                        if _sphere_box_hit(spheres[:, :3], spheres[:, 3], dims + padding, centre, frame):
+                            raise Refused(f"Docking route blocked by parked arm near {box['name']}. Repark the chair.")
+                check_sphere_route(model, spheres, route, self.mount)
+            except (
+                StateTimeout,
+                SimModelError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                AttributeError,
+                ET.ParseError,
+                yaml.YAMLError,
+            ) as error:
+                self.warn(f"Parked-arm spheres unavailable. Using the legacy guard. {error}")
+                self.unavailable = True
+            else:
+                check_route(model, chair, padding, route, self.mount)
+                return
+
+        if self.raw_arrival:
+            check_raw_route(model, chair, arrival.arm_envelopes(self.fk, q), padding, route, self.mount)
+            return
+        points = np.vstack((np.zeros(3), self.fk.joint_points(q)))
+        links = [
+            dict(name=f"arm link {index}", position=(a + b) / 2, dims=np.abs(b - a) + 0.16)
+            for index, (a, b) in enumerate(zip(points[:-1], points[1:], strict=True))
+        ]
+        check_route(model, [*chair, *links], padding, route, self.mount)
