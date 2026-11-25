@@ -20,12 +20,14 @@ def setup_hook():
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_plan_hook")
     after = Mock()
     after.plan.return_value = True, "released"
+    after.motion.joined.q = np.zeros((3, 7))
     check = Mock()
     scope = dict(
         np=np,
         S=SimpleNamespace(bar_point=Mock(return_value=np.array([0.8, -0.2, 0.4]))),
         HOOK_ANGLE_DEG=94.0,
         HOOK_LAGS_DEG=(45.0, 55.0),
+        HOOK_EXIT_LIMIT_MARGIN_DEG=9.0,
         time=SimpleNamespace(monotonic=lambda: 10.0),
         check_open=check,
         Refused=Refused,
@@ -46,6 +48,7 @@ def setup_hook():
     )
     planner = Mock()
     planner.deadline = None
+    planner.limit_margin.return_value = 12.0
     planner.motion.return_value = (
         SimpleNamespace(q_end=np.ones(7), goals=[SimpleNamespace(pos=np.ones(3), quat=np.array([0.0, 0.0, 0.0, 1.0]))]),
         "",
@@ -73,6 +76,12 @@ def test_hook_retains_the_baseline_if_the_exterior_exit_fails():
     assert plan_hook(planner, baseline, {"n": np.array([-1.0, 0.0, 0.0])}) is None
     planner.join.assert_not_called()
     assert "hook" not in baseline["cand"]
+
+
+def test_hook_declines_when_withdrawal_has_no_tracking_margin():
+    plan_hook, planner, baseline, _, _ = setup_hook()
+    planner.limit_margin.return_value = 8.0
+    assert plan_hook(planner, baseline, {"n": np.array([-1.0, 0.0, 0.0])}) is None
 
 
 def test_hook_refuses_if_the_door_sweep_gate_is_blocked():

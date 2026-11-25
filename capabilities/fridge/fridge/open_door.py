@@ -72,6 +72,7 @@ HOOK_PREFLIGHT_S = 12.0
 HOOK_LOAD_WINDOW_DEG = (83.0, 92.0)
 HOOK_MIN_HINGE_LOAD_NM = 0.08
 HOOK_MIN_LOAD_SAMPLES = 3
+HOOK_EXIT_LIMIT_MARGIN_DEG = 9.0
 HOOK_LAGS_DEG = (55.0, 60.0, 45.0)
 REPLAN_DEG = 1.0  # after the grasp, the swing is planned again from the real joints if they are further than this off
 
@@ -1552,8 +1553,12 @@ def _plan_hook(planner, plan, geom):
             if not ok:
                 say(f"  hook lag {lag:g}° declined: {why}")
                 continue
-            planner.join(swing, model.cabinet())
             planner.join(after.motion, model.cabinet())
+            margin = planner.limit_margin(after.motion.joined.q)
+            if margin < HOOK_EXIT_LIMIT_MARGIN_DEG:
+                say(f"  hook lag {lag:g}° declined: only {margin:.1f}° of joint clearance on withdrawal")
+                continue
+            planner.join(swing, model.cabinet())
             return dict(
                 plan,
                 door=closed,
