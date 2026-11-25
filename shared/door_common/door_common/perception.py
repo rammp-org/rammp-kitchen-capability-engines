@@ -74,6 +74,8 @@ class WristCamera:
         sam3_prompts=("handle",),
         sam3_threshold=0.3,
         box2d_topic="",
+        *,
+        checkpoint=None,
     ):
         """`camera_frame` "" = the colour image's own frame_id. Depth must be aligned to colour.
         `box_topic`: boxer's 3D boxes (rammp_perception_interfaces/ObjectDetections, from the scene camera); each
@@ -97,6 +99,7 @@ class WristCamera:
         self.node, self.base_frame, self.camera_frame = node, base_frame, camera_frame
         self.box_topic, self.box_class = box_topic, box_class
         self.color_topic, self.sam3_prompts, self.sam3_threshold = color_topic, list(sam3_prompts), sam3_threshold
+        self._checkpoint = checkpoint
         self._bridge = CvBridge()
         self._lock = threading.Lock()
         self._latest = None
@@ -205,9 +208,19 @@ class WristCamera:
         )
         done, fut = threading.Event(), self._sam3.call_async(req)
         fut.add_done_callback(lambda _: done.set())
-        if not done.wait(SAM3_TIMEOUT_S):
-            say(f"  SAM 3 did not answer in {SAM3_TIMEOUT_S:g} s")
-            return [], None
+        deadline = time.monotonic() + SAM3_TIMEOUT_S
+        try:
+            while not done.is_set():
+                if self._checkpoint is not None:
+                    self._checkpoint()
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    say(f"  SAM 3 did not answer in {SAM3_TIMEOUT_S:g} s")
+                    return [], None
+                done.wait(min(0.1, left))
+        finally:
+            if not fut.done():
+                fut.cancel()
         resp = fut.result()
         if not resp.success:
             say(f"  SAM 3: {resp.message}")
@@ -265,6 +278,8 @@ class WristCamera:
     def wait_for_frames(self, timeout_s=10.0):
         t0 = time.time()
         while time.time() - t0 < timeout_s:
+            if self._checkpoint is not None:
+                self._checkpoint()
             with self._lock:
                 if self._latest is not None:
                     return True

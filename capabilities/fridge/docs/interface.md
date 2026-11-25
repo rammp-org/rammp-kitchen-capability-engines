@@ -81,7 +81,10 @@ and `base_moves: true` locates the closed fridge with fresh scene RGB-D and chec
 the parked Fridge arm pose. A selected wrist feed can supply a stationary fallback and confirms the
 final pose before arm planning. The target handle is 0.825 m forward and 0.235 m right of the mount,
 with the inward normal at −14° relative to chair forward. The position and heading tolerances are
-2.5 cm and 2°. With `execute: false`, the arm plans from the current parking pose and the base stays still.
+2.5 cm and 2°. Set `docking_target_handle_xy` and `docking_target_yaw_deg` for a measured alternate dock.
+Set `hinge_side: right` for a right-hinged fixture. Both `guided_docking_enabled` (checked manual steering
+instructions in the Open panel) and `open_scene_fallback_enabled` (fixed-base scene look after wrist refusal)
+default to false. With `execute: false`, the arm plans from the current parking pose and the base stays still.
 
 Docking defaults to `docking_max_linear_speed: 0.05` m/s and `docking_max_yaw_speed: 0.12` rad/s.
 The settings accept up to 0.15 m/s and 0.30 rad/s respectively. Translation also observes the

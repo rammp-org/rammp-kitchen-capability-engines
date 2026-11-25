@@ -67,6 +67,7 @@ params:
   # (handle_centre_to_face_m + pin_behind_face_m), 0.374 m along it. See constants.py.
   pin_behind_face_m: -0.021
   hinge_along_door_m: 0.374
+  hinge_side: left
   door_width_m: 0.44958
   door_depth_m: 0.10668
   door_above_handle_m: 0.381
@@ -169,6 +170,10 @@ params:
   # Experimental fixture-A docking, with both RGB-D cameras online. Enable for the Gen1.5 after
   # checking the odometry datum, arm staging pose, full chair footprint and emergency stop.
   docking_enabled: false
+  guided_docking_enabled: false
+  open_scene_fallback_enabled: false
+  docking_target_handle_xy: [0.825, -0.235]
+  docking_target_yaw_deg: -14.0
   docking_max_linear_speed: 0.05
   docking_max_yaw_speed: 0.12
   docking_axle_to_mount_xy: [0.11595, 0.284325]

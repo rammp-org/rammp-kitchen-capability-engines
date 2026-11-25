@@ -609,7 +609,7 @@ class Capability(CapabilityEngine):
                 log = self.get_logger().info if back else self.get_logger().error
                 log(f"contact stop: default profile {'back' if back else 'NOT restored'} ({said})")
 
-    def _open_scene_camera(self, camera):
+    def _open_scene_camera(self, camera, checkpoint):
         topics = tuple(self.cfg[k] for k in ("scene_color_topic", "scene_camera_info_topic", "scene_depth_topic"))
         if not all(topics):
             raise dc.Refused("The fridge look needs the scene RGB-D camera topics")
@@ -623,14 +623,15 @@ class Capability(CapabilityEngine):
                 sam3=self.sam3,
                 sam3_prompts=self.cfg["sam3_prompts"],
                 sam3_threshold=self.cfg["sam3_threshold"],
+                checkpoint=checkpoint,
             )
         )
 
-    def _detect_open_with_scene_fallback(self, camera):
+    def _detect_open_with_scene_fallback(self, camera, checkpoint):
         try:
             return open_door.detect(self.arm)
         except dc.Refused:
-            scene = self._open_scene_camera(camera)
+            scene = self._open_scene_camera(camera, checkpoint)
             self.get_logger().info("Fridge wrist look refused. Trying the scene view.")
             try:
                 dc.set_camera(scene)
@@ -644,7 +645,7 @@ class Capability(CapabilityEngine):
             raise dc.Refused("Docking needs a measured door normal")
         if not np.allclose(self.cfg["chair_back_dir"], [1.0, 0.0]):
             raise dc.Refused("Docking needs the Gen1.5 arm mount square to the wheelchair")
-        scene = self._open_scene_camera(camera)
+        scene = self._open_scene_camera(camera, ctx.checkpoint)
         mount = np.asarray(self.cfg["docking_axle_to_mount_xy"], float)
         odom = np.asarray(self.cfg["docking_odom_to_axle_xy"], float)
         if any(offset.shape != (2,) or not np.isfinite(offset).all() for offset in (mount, odom)):
@@ -805,6 +806,7 @@ class Capability(CapabilityEngine):
             sam3=self.sam3,
             sam3_prompts=self.cfg["sam3_prompts"],
             sam3_threshold=self.cfg["sam3_threshold"],
+            checkpoint=ctx.checkpoint,
         )
         dc.set_camera(camera)
         dc.set_output(self.get_logger().info)
@@ -880,7 +882,7 @@ class Capability(CapabilityEngine):
 
             def start_wrist():
                 def scene_model():
-                    scene = self._open_scene_camera(camera)
+                    scene = self._open_scene_camera(camera, ctx.checkpoint)
                     scene.require_frames_after_now()
                     dc.set_camera(scene)
                     try:
@@ -905,6 +907,7 @@ class Capability(CapabilityEngine):
                     sam3=self.sam3,
                     sam3_prompts=self.cfg["sam3_prompts"],
                     sam3_threshold=self.cfg["sam3_threshold"],
+                    checkpoint=ctx.checkpoint,
                 )
                 dc.set_camera(wrist)
                 try:
@@ -919,7 +922,7 @@ class Capability(CapabilityEngine):
                     and self.cfg.get("open_scene_fallback_enabled")
                     and self.cfg["detect_camera"] == "wrist"
                 ):
-                    detect_open = partial(self._detect_open_with_scene_fallback, camera)
+                    detect_open = partial(self._detect_open_with_scene_fallback, camera, ctx.checkpoint)
 
                 ok = open_door.run(
                     self.arm,
