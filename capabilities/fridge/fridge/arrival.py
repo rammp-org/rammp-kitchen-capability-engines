@@ -188,8 +188,8 @@ def relook_obstacle(frame):
     return [
         {
             "name": "scene fridge front",
-            "position": [*((front + 0.45) * normal), 0.25],
+            "position": [float(x) for x in (front + 0.45) * normal] + [0.25],  # plain floats: the planner's YAML
             "dims": [1.0, 3.0, 1.8],
-            "rpy_deg": [0, 0, math.degrees(math.atan2(normal[1], normal[0]))],
+            "rpy_deg": [0.0, 0.0, float(math.degrees(math.atan2(normal[1], normal[0])))],
         }
     ]
