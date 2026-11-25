@@ -8,13 +8,14 @@ from scipy.spatial.transform import Rotation
 
 from .constants import HAND_BOX_TOOL_M
 from .door_sweep import DoorSweep
+from .world import HANDLE_PROTRUSION_M
 
 CLOSE_M = 0.34
 LOOK_CLEARANCE_M = 0.43
 MAX_REVERSE_M = 0.29
 # Includes the handle protrusion, fitted-door uncertainty and the raw route margin.
-CLOSE_ARM_M = 0.16
-LOOK_ARM_CLEARANCE_M = 0.20
+CLOSE_ARM_M = 0.20
+LOOK_ARM_CLEARANCE_M = 0.23
 REPARK = "With the route clear, back straight away from the fridge until your footrest is about 45 cm away, then retry."
 
 
@@ -105,6 +106,32 @@ def arm_envelopes(fk, joints):
     return boxes
 
 
+def _reverse_sweep(points, centre, axes, half, distance):
+    """Intersect a straight reverse with the box in its local coordinates."""
+    local = (points - centre) @ axes.T
+    motion = axes[:, 0]
+    moving = np.abs(motion) > 1e-10
+    crossing_a = (-half[moving] - local[:, moving]) / motion[moving]
+    crossing_b = (half[moving] - local[:, moving]) / motion[moving]
+    enter = np.maximum(0, np.minimum(crossing_a, crossing_b).max(axis=1))
+    leave = np.minimum(distance, np.maximum(crossing_a, crossing_b).min(axis=1))
+    return (enter <= leave) & (np.abs(local[:, ~moving]) <= half[~moving]).all(axis=1)
+
+
+def _fixture_returns(points, normal, front, model):
+    if model is not None:
+        half_sizes, centres, axes = DoorSweep._boxes(model.full(0))
+        matched = np.zeros(len(points), dtype=bool)
+        for half, centre, axis in zip(half_sizes, centres, axes, strict=True):
+            matched |= _inside(points, centre, axis, half + 0.01)
+        return matched
+    # The depth-only fit establishes the front plane before a handle look is
+    # possible. Use the measured handle depth only on the fixture side of each
+    # box below. Returns elsewhere keep the full obstacle margin.
+    offset = points[:, :2] @ normal - front
+    return (offset >= -HANDLE_PROTRUSION_M - 0.01) & (offset <= 0.015)
+
+
 def reverse_distance(frame, chair, arm_boxes, padding, model=None):
     """Allow only straight separation from the observed front and check visible obstacles."""
     if not chair or not arm_boxes:
@@ -123,6 +150,12 @@ def reverse_distance(frame, chair, arm_boxes, padding, model=None):
     leading = centres[:, :2] @ normal + (np.abs(axes[:, :, :2] @ normal) * half_sizes).sum(axis=1)
     clearance = front - max(leading[: len(chair)])
     arm_clearance = front - max(leading[len(chair) :])
+    # Use the fitted face to screen initial contact before the self mask can
+    # hide it. Near the fit/noise boundary defer to the visible sweep check.
+    on_face = np.abs(points[:, :2] @ normal - front) <= 0.01
+    for half, centre, axis in zip(half_sizes[len(chair) :], centres[len(chair) :], axes[len(chair) :], strict=True):
+        if np.count_nonzero(_inside(points[on_face], centre, axis, half - 0.01)) >= 2:
+            raise Refused(f"The parked arm could be touching the fridge. {REPARK}")
     if clearance >= CLOSE_M and arm_clearance >= CLOSE_ARM_M:
         return 0.0
     chair_back = LOOK_CLEARANCE_M - clearance if clearance < CLOSE_M else 0.0
@@ -131,17 +164,18 @@ def reverse_distance(frame, chair, arm_boxes, padding, model=None):
     if clearance <= padding or distance > MAX_REVERSE_M:
         raise Refused(f"The chair has insufficient clearance for automatic backing. {REPARK}")
 
-    # Reverse carries the arm and occupant as a rigid unit, so their relative
-    # separation stays fixed. Check the newly occupied volume against scene
-    # returns. Keep the initial arm envelope at full size for the self mask,
-    # then check the actual link path at each outward step.
+    # Test the exact swept oriented box. A fixture-side return can overlap
+    # the tracking margin at departure while the physical box separates.
+    # Keep such returns in the unpadded check and retain the full margin for
+    # anything on the trailing side of a box.
     scene = scene[scene[:, 2] > -0.46]
+    fixtures = _fixture_returns(scene, normal, front, model)
     for half, centre, axis in zip(half_sizes, centres, axes, strict=True):
-        for x in np.linspace(0, distance + 0.01, math.ceil(distance / 0.01) + 2):
-            # Require spatial support so an isolated stereo return on a
-            # masked robot edge does not represent a stationary obstruction.
-            if np.count_nonzero(_inside(scene, centre - [x, 0, 0], axis, half + padding)) >= 2:
-                raise Refused(f"The scene depth shows an obstacle in the reverse path. {REPARK}")
+        front_returns = fixtures & (scene[:, 0] > centre[0])
+        hits = _reverse_sweep(scene, centre, axis, half + padding, distance + 0.01)
+        hits[front_returns] = _reverse_sweep(scene[front_returns], centre, axis, half, distance + 0.01)
+        if np.count_nonzero(hits) >= 2:
+            raise Refused(f"The scene depth shows an obstacle in the reverse path. {REPARK}")
     return distance
 
 

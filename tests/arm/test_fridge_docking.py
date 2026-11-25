@@ -125,8 +125,29 @@ def test_depth_allows_reversing_a_padding_only_arm_overlap(monkeypatch):
     chair = [dict(name="chair", position=[0.10, 0.0, -0.10], dims=[0.30, 0.40, 0.40])]
     arm = [dict(name="arm", position=[0.405, 0.0, 0.50], dims=[0.20, 0.14, 0.14])]
     reverse = arrival.reverse_distance(None, chair, arm, padding=0.02)
-    assert reverse == pytest.approx(0.185, abs=0.01)
+    assert reverse == pytest.approx(0.215, abs=0.01)
     assert 0.52 + reverse - 0.505 >= 0.19
+
+
+def test_depth_refuses_possible_arm_contact_before_reversing(monkeypatch):
+    y, z = np.meshgrid(np.linspace(-0.26, 0.26, 27), np.linspace(0.43, 0.75, 20))
+    face = np.column_stack((np.full(y.size, 0.52), y.ravel(), z.ravel()))
+    monkeypatch.setattr(arrival, "depth_points", lambda _: face)
+    chair = [dict(name="chair", position=[0.10, 0.0, -0.10], dims=[0.30, 0.40, 0.40])]
+    arm = [dict(name="arm", position=[0.45, 0.0, 0.50], dims=[0.20, 0.14, 0.14])]
+    with pytest.raises(Refused, match="touching the fridge.*back straight away"):
+        arrival.reverse_distance(None, chair, arm, padding=0.02)
+
+
+def test_depth_refuses_obstacle_behind_reversing_chair(monkeypatch):
+    y, z = np.meshgrid(np.linspace(-0.26, 0.26, 27), np.linspace(0.43, 0.75, 20))
+    face = np.column_stack((np.full(y.size, 0.52), y.ravel(), z.ravel()))
+    obstacle = [[-0.19, 0.05, -0.10], [-0.19, 0.08, -0.10]]
+    monkeypatch.setattr(arrival, "depth_points", lambda _: np.vstack((face, obstacle)))
+    chair = [dict(name="chair", position=[0.10, 0.0, -0.10], dims=[0.30, 0.40, 0.40])]
+    arm = [dict(name="arm", position=[0.405, 0.0, 0.50], dims=[0.20, 0.14, 0.14])]
+    with pytest.raises(Refused, match="obstacle in the reverse path"):
+        arrival.reverse_distance(None, chair, arm, padding=0.02)
 
 
 def test_close_arrival_backs_straight_before_looking_or_preparing_arm():
