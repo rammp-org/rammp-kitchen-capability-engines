@@ -171,6 +171,7 @@ params:
   # checking the odometry datum, arm staging pose, full chair footprint and emergency stop.
   docking_enabled: false
   guided_docking_enabled: false
+  guided_parking_instruction: ""
   open_scene_fallback_enabled: false
   open_wrist_relook_enabled: false
   docking_target_handle_xy: [0.825, -0.235]

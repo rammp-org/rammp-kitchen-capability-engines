@@ -147,6 +147,7 @@ PARAMS = {
     "open_wrist_relook_enabled": False,  # alternate wrist motion needs calibrated scene geometry
     "open_scene_fallback_enabled": False,  # retry a refused fixed-base wrist look on the scene camera
     "guided_docking_enabled": False,  # show checked drive steps on the Open UI buttons
+    "guided_parking_instruction": "",  # deployment-specific floor mark for the initial arrival
     "docking_target_handle_xy": docking.TARGET_HANDLE.tolist(),
     "docking_target_yaw_deg": float(np.degrees(docking.TARGET_YAW)),
     "docking_axle_to_mount_xy": list(docking.AXLE_TO_MOUNT[:2]),
@@ -413,6 +414,20 @@ class Capability(CapabilityEngine):
             )
             self._ui_failed(ui, action_id, error)
             raise error
+        parking = self.cfg.get("guided_parking_instruction", "").strip()
+        if (
+            parking
+            and not self.mock
+            and self.cfg.get("guided_docking_enabled")
+            and (action_id == "go_to_start" or (action_id == "open" and params.get("drive_base")))
+        ):
+            pressed = ui.ask(
+                f"{parking} Stop the wheelchair, then press Continue.",
+                [{"button_id": "continue", "label": "Continue"}],
+                timeout_s=constants.UI_PROMPT_TIMEOUT_S,
+            )
+            if not self._ui_answer(ui, "parking at the fridge", pressed, "continue"):
+                raise EngineError("parking_required", parking, recoverable=True)
         while True:
             ctx.checkpoint()
             self._drove = False  # a Stop before _execute runs mustn't read the last goal's
