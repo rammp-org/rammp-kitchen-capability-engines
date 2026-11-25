@@ -48,6 +48,7 @@ from itertools import chain
 from threading import Event
 
 import numpy as np
+import rammp_arm
 from door_common import common as dc
 from door_common import open_door as shared
 from door_common.common import Refused, quiet, save_door_geometry, say
@@ -69,6 +70,10 @@ HOOK_CLOSURE = 0.82
 HOOK_FORCE = 0.15
 HOOK_BACK_OFF_M = 0.05
 HOOK_PREFLIGHT_S = 12.0
+HOOK_DEFAULT_SPEED = 0.7
+HOOK_EARLY_PULL_SCALE = 0.90
+HOOK_EARLY_PULL_SPEEDUP = 0.90 / 0.595
+HOOK_SLOW_FROM_DEG = 60.0
 HOOK_LOAD_WINDOW_DEG = (83.0, 92.0)
 HOOK_MIN_HINGE_LOAD_NM = 0.08
 HOOK_MIN_LOAD_SAMPLES = 3
@@ -639,15 +644,20 @@ def swing_goals(model, cand, swing, lag=0.0):
         poses = [swung(cand["pos"], cand["quat"], df.hinge, df.sign, d) for d in degs]
     # the door turns with the hand, so no one world can hold it: the swing is checked against the cabinet (with the
     # planner's chair layers and the arm itself), as the old planner's pull was
-    return [
-        pl.through(
-            poses,
-            f"swing to {swing:.0f} deg",
-            model.cabinet(),
-            world_label="the cabinet (the door turns with the hand)",
-            segment_worlds=S.swing_worlds(model, degs) if cand.get("side") or cand.get("hook") else None,
-        )
-    ]
+    goal = pl.through(
+        poses,
+        f"swing to {swing:.0f} deg",
+        model.cabinet(),
+        world_label="the cabinet (the door turns with the hand)",
+        segment_worlds=S.swing_worlds(model, degs) if cand.get("side") or cand.get("hook") else None,
+    )
+    if cand.get("hook"):
+        # Speed up the middle of the stroke, keeping the original cap as the
+        # door approaches the late-pull retention window.
+        contact_scale = rammp_arm.JOINT_SPEED * rammp_arm.contact_speed_scale() / pl.LOCAL_JOINT_SPEED
+        goal.speed = min(HOOK_EARLY_PULL_SCALE, contact_scale * HOOK_EARLY_PULL_SPEEDUP)
+        goal.caps = [min(1.0, contact_scale / goal.speed) if deg >= HOOK_SLOW_FROM_DEG else 1.0 for deg in degs]
+    return [goal]
 
 
 SWING_POINT_DEG = 2.0  # the swing's path: a pose every this much door
@@ -1575,7 +1585,7 @@ def _plan_hook(planner, plan, geom):
     return None
 
 
-def _hook_preflight(planner, geom, q0, staging):
+def _hook_preflight(planner, geom, q0, staging, free_speed=None):
     """Plan the validated front approach before searching the push fallback."""
     if F.GRASP == "side":
         return None
@@ -1595,6 +1605,13 @@ def _hook_preflight(planner, geom, q0, staging):
             return None
         planner.join(approach, model.cabinet())
         plan = _plan_hook(planner, dict(cand=cand, model=model, approach=approach), geom)
+        if plan is not None and free_speed is not None:
+            # Keep the preflight and fallback request order for refused hooks.
+            # A declined retime leaves the original checked approach in place.
+            try:
+                planner.join(approach, model.cabinet(), speed=free_speed)
+            except Refused as error:
+                say(f"  hook approach retime declined: {error}")
         planner.check_deadline()
         return plan
     except Refused as e:
@@ -1602,14 +1619,14 @@ def _hook_preflight(planner, geom, q0, staging):
         return None
 
 
-def _select_open_plan(planner, geom, q0, staging, hook, fallback):
+def _select_open_plan(planner, geom, q0, staging, hook, fallback, hook_free_speed=None):
     if not hook:
         return fallback()
     previous_deadline = planner.deadline
     deadline = time.monotonic() + HOOK_PREFLIGHT_S
     planner.deadline = deadline if previous_deadline is None else min(deadline, previous_deadline)
     try:
-        plan = _hook_preflight(planner, geom, q0, staging)
+        plan = _hook_preflight(planner, geom, q0, staging, hook_free_speed)
     finally:
         planner.deadline = previous_deadline
     if plan is not None:
@@ -1769,7 +1786,8 @@ def run(
     driven by the base within this goal, not asked for. `base_moves` False: the open plans no wheelchair move at all
     (the push from where the chair stands, or it refuses), and the placement advice leaves out the cells that need
     one (constants CELLS_NEEDING_BASE_MOVE). `hook` tries a stationary partial-closure pull when the default opening
-    angle is requested, with the normal checked push as a pre-motion fallback. Returns True when it finished
+    angle is requested, with the normal checked push as a pre-motion fallback. Its free-space approach uses full
+    planner speed at the default hook speed. Returns True when it finished
     (or the dry run passed); raises Refused."""
     global BASE_MOVES
     P.NEXT_STEP, P.NEXT_MOVE, P.FINAL_ANGLE_DEG = "", 0.0, None
@@ -1840,6 +1858,7 @@ def run(
                     progress=progress,
                     prediction=prediction,
                 ),
+                hook_free_speed=min(1.0, speed / HOOK_DEFAULT_SPEED),
             )
             if plan["cand"].get("hook"):
                 after = plan["after"]
