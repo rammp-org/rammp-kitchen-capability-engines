@@ -1895,6 +1895,9 @@ def run(
             LAST_PLAN = dict(plan, geom=geom, q0=q0)
             swung = execute_open(ai, planner, plan, fast=fast)
         if not swung:
+            if plan["cand"].get("hook"):
+                say("Hook stopped in place. Check the door position and grip before commanding motion.")
+                return False
             holding = float(ai.get_state()["gripper_pos"]) > 0.2
             say(
                 "swing did not finish -- stopping "

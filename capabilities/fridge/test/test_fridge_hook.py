@@ -94,8 +94,8 @@ def test_hook_refuses_if_the_door_sweep_gate_is_blocked():
 
 @pytest.mark.parametrize(
     ("swing_ok", "end_closure"),
-    [(False, 0.8), (True, 0.0)],
-    ids=["driver-stop", "fingers-reopened"],
+    [(False, 0.8), (True, 0.0), (True, 0.82)],
+    ids=["driver-stop", "fingers-reopened", "setpoint-without-load"],
 )
 def test_failed_hook_skips_release_and_withdrawal(swing_ok, end_closure):
     from contextlib import nullcontext
@@ -112,7 +112,7 @@ def test_failed_hook_skips_release_and_withdrawal(swing_ok, end_closure):
         save_door_geometry=Mock(),
         say=Mock(),
         ArcTrace=lambda arm: nullcontext(),
-        HookLoadTrace=lambda arm, door: nullcontext(),
+        HookLoadTrace=lambda arm, door: nullcontext(SimpleNamespace(retained=lambda: False)),
         hand_angle=lambda door, pose: -94.0,
         Refused=Refused,
         P=push,
