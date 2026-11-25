@@ -844,7 +844,10 @@ class Capability(CapabilityEngine):
         )
         docking_requested = may_park and drive_base and bool(self.cfg.get("docking_enabled"))
         guidance_requested = (
-            may_park and bool(self.cfg.get("guided_docking_enabled")) and getattr(self, "_ui", None) is not None
+            may_park
+            and bool(self.cfg.get("guided_docking_enabled"))
+            and getattr(self, "_ui", None) is not None
+            and not (docking_requested and self.cfg.get("guided_parking_instruction", "").strip())
         )
         if drive_base:
             base_cfg = {k: self.cfg[k] for k in base_drive.PARAMS}

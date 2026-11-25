@@ -91,7 +91,7 @@ With guided docking enabled, set `guided_parking_instruction` to directions to a
 The Go to Fridge and Open Fridge Door (wheelchair drives) panels ask the user to park and stop there
 before launching the action. On left-hinge fixture A, use the E mark with the axle 0.97 m from the
 closed front, 0.65 m along the front from the hinge toward the handle, and 14° toward the hinge from
-square. Enable `docking_enabled` for the robot to fine-correct after parking. Leave the instruction
+square. Enable `docking_enabled` for the robot to fine-correct directly after parking. Leave the instruction
 empty on installations without a verified mark.
 
 Docking defaults to `docking_max_linear_speed: 0.05` m/s and `docking_max_yaw_speed: 0.12` rad/s.
