@@ -630,13 +630,11 @@ def _release(ai, *, early=False):
     """Open the gripper, slowly, the hand still (the swing has stopped at its angle). Refused if the gripper's own
     reported position (its joint state, not a camera) still says closed after the command: backing off then would drag
     the door."""
-    if early:
-        opened = ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED, open_threshold=0.2)
-        position = ai.gripper_state().position if opened else float("inf")
-    else:
-        opened = ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED)
-        position = ai.get_state()["gripper_pos"]
-    if opened is False or not 0.0 <= float(position) <= 0.2:
+    kwargs = {"open_threshold": 0.2} if early else {}
+    opened = ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED, **kwargs)
+    state = ai.gripper_state() if opened is not False and hasattr(ai, "gripper_state") else None
+    position = state.position if state is not None else ai.get_state()["gripper_pos"]
+    if opened is False or (state is not None and not state.present) or not 0.0 <= float(position) <= 0.2:
         raise Refused("the gripper did not open -- the hand is still on the handle.")
 
 

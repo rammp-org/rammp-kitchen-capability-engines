@@ -1256,7 +1256,11 @@ class ArmInterface:
             time.sleep(GRIPPER_PERIOD_S)
             if open_threshold is not None:
                 state = self.gripper_state()
-                if state.age_s <= time.monotonic() - t0 and state.position <= open_threshold:
+                if (
+                    state.present
+                    and state.age_s <= time.monotonic() - t0
+                    and 0.0 <= state.position <= open_threshold
+                ):
                     return True
                 g = state.position
             else:

@@ -1187,14 +1187,14 @@ class GraspUnconfirmed(Refused):
 
 def confirm_grasp(ai):
     if ai.gripper(1.0, force=F.GRASP_FORCE) is False:
-        raise Refused("Gripper close did not complete -- refusing to pull.")
+        raise Refused("Gripper close did not complete. Check whether the hand is on the handle.")
     grip = ai.gripper_state() if hasattr(ai, "gripper_state") else None
     position = float(grip.position if grip is not None else ai.get_state()["gripper_pos"])
     gap = F.GRIPPER_STROKE_M * (1.0 - position)
     current = f", motor current {grip.current:.3f}" if grip is not None and np.isfinite(grip.current) else ""
     say(f"  gripper after close: {position:.3f}, estimated gap {gap * 1000:.1f} mm{current}")
     if grip is not None and not grip.present:
-        raise Refused("Gripper feedback unavailable -- refusing to pull.")
+        raise Refused("Gripper feedback unavailable. Check whether the hand is on the handle.")
     if not F.GRASP_GAP_MIN_M <= gap <= F.GRASP_GAP_MAX_M:
         P._release(ai)
         if 0.0 <= gap < F.GRASP_GAP_MIN_M:

@@ -55,7 +55,8 @@ def appliance_envelope(model, route, mount):
 
 def plan_ready(planner, geom, predicted, joints, route, mount):
     """Plan from the parked arm against the complete envelope and occupant layers."""
-    if not planner.arm.gripper_state().position <= 0.2:
+    grip = planner.arm.gripper_state()
+    if not grip.present or not 0.0 <= grip.position <= 0.2:
         return None
     chair, _ = planner.world.door_sweep_boxes()
     grasp = "side" if F.GRASP == "auto" else F.GRASP
@@ -117,7 +118,8 @@ class ReadyMotion:
 
     @contextmanager
     def follow(self, clock):
-        if not self.arm.gripper_state().position <= 0.2:
+        grip = self.arm.gripper_state()
+        if not grip.present or not 0.0 <= grip.position <= 0.2:
             yield None
             return
         self._track(self.q[0], START_TOL_RAD)
