@@ -43,7 +43,7 @@ from capability_ui import RunUI, cancel_own_run
 from door_common import common as dc
 from door_common import open_door as shared_open
 
-from . import base_drive, close_door, constants, docking, motion, open_door, push_open, relocalize, ui_text
+from . import arrival, base_drive, close_door, constants, docking, motion, open_door, push_open, relocalize, ui_text
 from .door_sweep import SweepBlocked
 from .kinematics import Chain
 from .perception import WristCamera
@@ -690,7 +690,14 @@ class Capability(CapabilityEngine):
             finally:
                 dc.set_camera(camera)
 
-        def guard(geom, route):
+        guided_mark = (
+            getattr(self, "_ui", None) is not None
+            and self.cfg.get("guided_docking_enabled")
+            and self.cfg.get("guided_parking_instruction", "").strip()
+        )
+        raw_arrival = not guided and not guided_mark
+
+        def parked_geometry():
             q = np.asarray(self.arm.joint_states().position, float)
             start = np.radians(self.cfg["start_joints_deg"])
             if not np.isfinite(q).all() or _joint_gap_deg(start, q) > constants.START_REACHED_DEG:
@@ -698,13 +705,54 @@ class Capability(CapabilityEngine):
             boxes, padding = world.door_sweep_boxes()
             if not boxes:
                 raise dc.Refused("Docking requires the deployed chair and occupant geometry")
+            if raw_arrival:
+                return boxes, arrival.arm_envelopes(self._fk, q), padding
             # Conservative axis-aligned envelopes of each link at the verified start.
             points = np.vstack((np.zeros(3), self._fk.joint_points(q)))
             arm_boxes = [
                 dict(name=f"arm link {index}", position=(a + b) / 2, dims=np.abs(b - a) + 0.16)
                 for index, (a, b) in enumerate(zip(points[:-1], points[1:], strict=True))
             ]
-            docking.check_route(geom["closed_model"], [*boxes, *arm_boxes], padding, route, mount)
+            return boxes, arm_boxes, padding
+
+        def check_arrival():
+            boxes, arm_boxes, padding = parked_geometry()
+            scene.require_frames_after_now()
+            try:
+                frame = scene.grab()
+            except RuntimeError as error:
+                raise dc.Refused(arrival.REPARK) from error
+            return arrival.reverse_distance(frame, boxes, arm_boxes, padding)
+
+        def arrival_relook():
+            scene.require_frames_after_now()
+            obstacles = arrival.relook_obstacle(scene.grab())
+            wrist = camera
+            if camera is scene:
+                wrist = WristCamera(
+                    self,
+                    self.cfg["color_topic"],
+                    self.cfg["camera_info_topic"],
+                    self.cfg["depth_topic"],
+                    rammp_arm.FRAME,
+                    self.cfg["camera_frame"],
+                    sam3=self.sam3,
+                    sam3_prompts=self.cfg["sam3_prompts"],
+                    sam3_threshold=self.cfg["sam3_threshold"],
+                    checkpoint=ctx.checkpoint,
+                )
+            dc.set_camera(wrist)
+            try:
+                return open_door.detect_after_arrival_relook(self.arm, planner, wrist, obstacles)
+            finally:
+                dc.set_camera(camera)
+
+        def guard(geom, route):
+            boxes, arm_boxes, padding = parked_geometry()
+            if raw_arrival:
+                docking.check_raw_route(geom["closed_model"], boxes, arm_boxes, padding, route, mount)
+            else:
+                docking.check_route(geom["closed_model"], [*boxes, *arm_boxes], padding, route, mount)
 
         def confirm(detected):
             if camera is scene:
@@ -777,6 +825,10 @@ class Capability(CapabilityEngine):
                     on_motion=moving,
                     on_route=preview,
                     confirm=confirm,
+                    arrival_check=check_arrival if raw_arrival else None,
+                    arrival_relook=(
+                        arrival_relook if planner is not None and self.cfg.get("open_wrist_relook_enabled") else None
+                    ),
                     **target,
                 )
         ctx.progress("open", 0.0, f"Dock confirmed after {iterations} correction(s)", pausable=False)

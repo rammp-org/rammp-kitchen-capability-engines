@@ -94,10 +94,24 @@ closed front, 0.65 m along the front from the hinge toward the handle, and 14° 
 square. Enable `docking_enabled` for the robot to fine-correct directly after parking. Leave the instruction
 empty on installations without a verified mark.
 
+Raw autonomous docking checks fresh scene depth from the verified parked arm before the first
+handle look. On the Gen1.5 cabinet-height fixture, a front clearance below 34 cm triggers a
+straight reverse toward 43 cm of occupied-footprint clearance. The arm envelope can also
+trigger or lengthen the reverse when its projection is within 16 cm of the front plane,
+including a margin for the protruding handle. The reverse is capped at 29 cm and observes the configured base travel limit. The chair, occupant and arm move as a
+unit, and the arm must hold its parked joints during the reverse. The check uses visible
+depth points and the calibrated boxes. The scene camera faces forward, so the space behind
+the chair must be clear before sending the goal. After stopping, the action takes a fresh
+look. With `open_wrist_relook_enabled`, it can use checked raised wrist views after a
+failed look, then parks the arm again before continuing to dock.
+
 Docking defaults to `docking_max_linear_speed: 0.05` m/s and `docking_max_yaw_speed: 0.12` rad/s.
 The settings accept up to 0.15 m/s and 0.30 rad/s respectively. Translation also observes the
 goal's `base_speed` and the configured `base_max_speed`. Docking reserves up to 0.35 m and 180°
-of cumulative motion and permits three corrections. It uses `docking_axle_to_mount_xy` for the turning center and
+of cumulative motion and permits three corrections. After a successful close-arrival reverse,
+the correction travel budget increases by up to 25 cm, with each leg capped by
+`base_max_distance`. Raw autonomous docking can also try a checked straight final approach
+or a longer retreat before turning. It uses `docking_axle_to_mount_xy` for the turning center and
 `docking_odom_to_axle_xy` for the published odometry origin. A dock-enabled open can plan a
 checked straight handoff after a shorter pull. The handoff releases and backs off the gripper before
 the base moves. The push is replanned after checking the displacement and heading. Confirm the

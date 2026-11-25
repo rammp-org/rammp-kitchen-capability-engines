@@ -1240,6 +1240,61 @@ def detect_with_wrist_relook(ai, planner, camera, scene_model):
         raise shared.NoHandleProposal(f"{first}; the checked wrist re-looks had no usable proposal.") from first
 
 
+def detect_after_arrival_relook(ai, planner, camera, obstacles):
+    """Take raised wrist views and return to the parked arm before any further drive."""
+    original = ai.get_state()
+    joints = np.asarray(original["position"], float)
+    pos = np.asarray(original["ee_pos"][:3])
+    quat = np.asarray(original["ee_pos"][3:7])
+    moved = False
+    try:
+        for degrees in (12, -12):
+            rotation = (R.from_euler("z", degrees, degrees=True) * R.from_quat(quat)).as_quat()
+            label = f"raised wrist look {degrees:+d} degrees"
+            target = pos + [-0.035, 0.0, 0.07]
+            goal = pl.free(target, rotation, label, obstacles, blend=0.0)
+            state = ai.get_state()
+            planner.search()
+            path, _ = planner.motion(
+                [goal], state["position"], start_pose=(state["ee_pos"][:3], state["ee_pos"][3:7]), from_arm=True
+            )
+            if path is None:
+                continue
+            planner.join(path, obstacles, label, speed=0.10)
+            if not planner.run(path, label):
+                raise Refused(f"{label} did not reach its checked pose.")
+            moved = True
+            camera.require_frames_after_now()
+            try:
+                geom, _ = detect(ai, for_docking=True)
+            except shared.NoHandleProposal:
+                continue
+            break
+        else:
+            raise shared.NoHandleProposal("The raised wrist views found no fridge handle.")
+    except Refused:
+        if moved:
+            _park_after_arrival_relook(ai, planner, joints, pos, quat, obstacles)
+        raise
+    _park_after_arrival_relook(ai, planner, joints, pos, quat, obstacles)
+    return geom, np.asarray(ai.joint_states().position, float)
+
+
+def _park_after_arrival_relook(ai, planner, joints, pos, quat, obstacles):
+    label = "return to the parked arm pose"
+    state = ai.get_state()
+    goal = pl.to_joints(joints, pos, quat, label, obstacles, blend=0.0)
+    planner.search()
+    path, why = planner.motion(
+        [goal], state["position"], start_pose=(state["ee_pos"][:3], state["ee_pos"][3:7]), from_arm=True
+    )
+    if path is None:
+        raise Refused(f"Could not {label}: {why}")
+    planner.join(path, obstacles, label, speed=0.10)
+    if not planner.run(path, label):
+        raise Refused(f"Could not {label}.")
+
+
 class GraspUnconfirmed(Refused):
     """The fingers did not stop at the expected handle width."""
 
