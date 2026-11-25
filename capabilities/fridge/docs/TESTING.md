@@ -270,11 +270,9 @@ Do this before relying on it.
 Any failed check refuses with nothing moved; a dry run (`"execute": false`) plans everything with cuRobo and says in
 advance what it will do. cuRobo plans round the planner's wheelchair and occupant boxes, but those are best guesses:
 **keep the space in front of the arm's base clear**, and start from a pose outside them (the web app's Fridge pose;
-a start inside them refuses at once, naming the boxes). Watch where the fingers close (the gripper closes as the pull
-starts) and whether the fridge drags during the pull (hinge values off). **Side grasp, first runs:** dry-run first and
-watch the slide in at a low `speed`: the finger behind the bar must pass between it and the door. Its depth on the bar
-is the one that worked on 11-06 (`SIDE_PADS_INTO_M`, `SIDE_PADS_PAST_BAR_M`), found with the scene camera's handle
-point; the wrist camera's (the default `detect_camera`) is unchecked for it. If the finger meets the bar's front or the
+a start inside them refuses at once, naming the boxes). Watch where the fingers close and check the reported gap
+before the pull. Watch whether the fridge drags during the pull (hinge values off). **Side grasp, first runs:** dry-run first and
+watch the slide in at a low `speed`: the finger behind the bar must pass between it and the door. The side and front grasps aim the pad midpoint at the printed bar's section center, about 9.4 mm behind the fitted front anchor. If the finger meets the bar's front or the
 door, stop (T4) and say how far off it was. The plan names the grasp it picked (`plan: side grasp, tilt +10 deg, ...`). A look failing with `handle model fit ...`
 says why the door's angle couldn't be measured (the handle too far, too little of it seen).
 

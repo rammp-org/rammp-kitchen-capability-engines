@@ -1,0 +1,45 @@
+{
+  "dock-00-2027": {
+    "angle_deg": 0.0,
+    "contact_events": [],
+    "id": "dock-00-2027",
+    "radial_xy_error_mm": 159.28576566947282,
+    "signed_fixture_error_mm": [
+      121.55134624530582,
+      -102.94282573770735,
+      0.8571538023253722
+    ],
+    "source": "v5.1-calibrated/historical-grasp-misses.jsonl",
+    "stages": [
+      {
+        "end_deg": 0.0,
+        "label": "approach",
+        "start_deg": 0.0,
+        "stop": ""
+      },
+      {
+        "end_deg": 0.0,
+        "label": "swing",
+        "start_deg": 0.0,
+        "stop": ""
+      },
+      {
+        "end_deg": 0.0,
+        "label": "off the handle + round the door + push-open",
+        "start_deg": 0.0,
+        "stop": ""
+      }
+    ]
+  },
+  "dock-20-1531": {
+    "end_error_m": 0.046,
+    "estimated_deg": 42.5,
+    "source": "v5.1-calibrated/demo/results/dock-20-1531.log",
+    "target_deg": 45.0
+  },
+  "dock-23-2027": {
+    "angle_deg": 46.19557914638227,
+    "detail": "push-open: no hand placement behind the door plans without a wheelchair move (last: in behind the door: cuRobo found no plan (MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides with the world (or exceeds limits) \u2014 check the world config against where the a...)) -- the hand is off the handle (gripper open), the arm holds where it is",
+    "source": "v5.1-calibrated/demo-episodes.jsonl"
+  }
+}

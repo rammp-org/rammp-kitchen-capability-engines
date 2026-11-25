@@ -47,13 +47,8 @@ def test_the_hand_slides_in_from_the_hinge_side_20_deg_off_the_door(side):
     # the fingers close across the door's normal (turned with the hand), level
     assert abs(fingers @ NORMAL) > np.cos(np.radians(90 - F.SIDE_INSERT_DEG)) - 1e-9
     assert abs(fingers[2]) < 1e-9
-    # the pads where they were on the arm on 11-06: 6 mm behind the detected point, into the
-    # door, then 5 cm on along the approach
     pads = level["pos"] + approach * shared.GRASP_PADS_PAST_TOOL
-    expect = HANDLE - NORMAL * F.SIDE_PADS_INTO_M + approach * F.SIDE_PADS_PAST_BAR_M
-    np.testing.assert_allclose(pads, expect, atol=1e-9)
-    # The mounting-plate clearance shifts the 11-06 bar point 5 mm outward.
-    assert F.SIDE_PADS_INTO_M == pytest.approx(-(0.126 - 0.040 - 0.042 - 0.055) - 0.005)
+    np.testing.assert_allclose(pads, HANDLE - NORMAL * F.HANDLE_BAR_CENTER_DEPTH_M, atol=1e-9)
 
 
 def test_every_tilt_from_40_up_to_40_down_keeps_the_pads_on_the_bar(side):
@@ -172,3 +167,49 @@ def test_the_side_grasp_has_its_own_placement_advice(side):
     assert dy > 0 and any("to its right" in m for m in moves)  # the handle too far right
     moves, _ = open_door.placement_moves(np.array([0.75, -0.30, 0.315]), NORMAL)
     assert moves == []
+
+
+@pytest.mark.parametrize("grasp", ["front", "side"])
+def test_pad_centers_straddle_the_printed_bar(fridge, grasp):
+    """Slice the shipped STL at permitted heights and check both jaws against the actual section."""
+    from pathlib import Path
+
+    from fridge import door_normal
+    from scipy.spatial import ConvexHull
+
+    raw = Path(door_normal.HANDLE_STL).read_bytes()
+    dtype = np.dtype([("normal", "<f4", 3), ("points", "<f4", (3, 3)), ("attr", "<u2")])
+    triangles = np.frombuffer(raw, dtype, offset=84)["points"].astype(float) / 1000
+    _, _, anchor, _, _, _ = door_normal.load_handle_model(n=1)
+    geom = _geom()
+    into = -NORMAL
+    lateral = np.cross(into, [0, 0, 1])
+    for height in (-0.07, 0.0, 0.07):
+        cut = anchor[0] + height
+        section = []
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            start, end = triangles[:, a], triangles[:, b]
+            crosses = (start[:, 0] < cut) != (end[:, 0] < cut)
+            start, end = start[crosses], end[crosses]
+            fraction = (cut - start[:, 0]) / (end[:, 0] - start[:, 0])
+            intersect = start + fraction[:, None] * (end - start)
+            section.extend((intersect - anchor)[intersect[:, 2] < anchor[2] + 0.03, 1:])
+        section = np.asarray(section)
+        assert np.ptp(section[:, 0]) == pytest.approx(F.HANDLE_BAR_WIDTH_M, abs=0.0002)
+        assert section[:, 1].min() == pytest.approx(F.HANDLE_BAR_FRONT_DEPTH_M, abs=0.0002)
+        assert section[:, 1].max() == pytest.approx(F.HANDLE_BAR_REAR_DEPTH_M, abs=0.0002)
+
+        equations = ConvexHull(section).equations
+        for retry in (False, True):
+            candidates = open_door.grasp_candidates(dict(geom, grasp_retry=retry), grasp)
+            assert candidates
+            for cand in candidates:
+                frame = R.from_quat(cand["quat"]).as_matrix()
+                offset = cand["pos"] + frame[:, 2] * shared.GRASP_PADS_PAST_TOOL - cand["h"]
+                center = np.array([offset @ lateral, offset @ into])
+                assert np.max(equations[:, :2] @ center + equations[:, 2]) < -0.004
+                # An open jaw on either side of the center clears the printed bar.
+                for jaw in (-1, 1):
+                    tip = offset + frame[:, 0] * jaw * F.GRIPPER_STROKE_M / 2
+                    point = np.array([tip @ lateral, tip @ into])
+                    assert np.max(equations[:, :2] @ point + equations[:, 2]) > 0.02

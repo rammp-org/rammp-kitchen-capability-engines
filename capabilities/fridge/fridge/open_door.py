@@ -31,10 +31,9 @@ GRASP_PITCHES_DEG, each with the hand either way up). The side grasp differs onl
      at rest there (local IK, the spare joint keeping J2/J4/J6 off their limits);
    - what follows (push_open.PushOpen, ReleaseAround, ReleaseBackOff), from the swing's planned end: straight back off
      the handle first.
-3. Execute, each motion one trajectory: the approach; the swing under the driver's stiffest joint impedance, the
-   gripper closing as it starts; at the swing's end, the arm stopped and the door with it, the gripper opens (its
-   reported position must say open); what follows, planned again from where that leaves the arm, as one more trajectory
-   under impedance.
+3. Execute the approach, confirm that the gripper closed on the bar, then swing under joint impedance. An empty
+   close gets one wrist re-look and retry. The gripper opens and is checked again after the door stops. The arm
+   plans what follows from its measured state and executes it under impedance.
 
 Refusals raise door_common.common.Refused: the arm holds where it is.
 """
@@ -266,9 +265,9 @@ def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", grasp="aut
     shared.configure(
         MAKE_DETECTOR=partial(_make_detector, m["handle_centre_to_face_m"], door_normal, hinge_direction),
         FIND_HINGE=shared.hinge_measured(hinge_offset, from_handle=True),
-        GRIP_EXT=F.GRIP_EXT,
+        GRIP_EXT=shared.GRASP_PADS_PAST_TOOL - F.HANDLE_BAR_CENTER_DEPTH_M,
         VERTICAL_CORR=F.VERTICAL_CORR,
-        GRASP_X_ADJUST=F.GRASP_X_ADJUST,
+        GRASP_X_ADJUST=0.0,
         GRASP_FORCE=F.GRASP_FORCE,
         # no gates on where the handle is or how high the grasp is: cuRobo's plans decide what can be done
         PLAUSIBLE_X=None,
@@ -478,9 +477,11 @@ def grasp_candidates(geom, grasp=None):
             quat = np.asarray(g.orientation, float)
             if flip:
                 quat = (R.from_quat(quat) * R.from_euler("z", 180, degrees=True)).as_quat()
-            out.append(
-                dict(pitch=pitch, flip=flip, h=np.asarray(h, float), pos=np.asarray(g.position, float), quat=quat)
-            )
+            pos = np.asarray(g.position, float)
+            if geom.get("grasp_retry"):
+                # Try a slightly shallower bite after the re-look, within the printed bar.
+                pos = pos + F.GRASP_RETRY_OUT_M * np.asarray(geom["n"], float)
+            out.append(dict(pitch=pitch, flip=flip, h=np.asarray(h, float), pos=pos, quat=quat))
     return out
 
 
@@ -736,7 +737,10 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
         )
     pull_angles = check_open(model, planner.world, angles, push)
     collision = planner.preflight_start(
-        model.full(0.0), q0, np.radians(F.START_JOINTS_DEG) if staging is None else staging
+        model.full(0.0),
+        q0,
+        np.radians(F.START_JOINTS_DEG) if staging is None else staging,
+        grasp_retry=bool(geom.get("grasp_retry")),
     )
     if collision:
         raise StagingRequired(collision)
@@ -1130,40 +1134,132 @@ def detect(ai, *, for_docking=False):
     return geom, q0
 
 
-def _close_gripper(ai):
-    ai.gripper(1.0, force=F.GRASP_FORCE)
+def detect_with_wrist_relook(ai, planner, camera, scene_model):
+    """Search for the vertical bar from two collision-checked viewpoints after an empty wrist look."""
+    try:
+        return detect(ai)
+    except shared.NoHandleProposal as first:
+        try:
+            model = scene_model()
+        except Refused as error:
+            raise shared.NoHandleProposal(f"{first}; no scene geometry for a wrist re-look: {error}") from error
+        frame = camera.grab()
+        if frame is None or frame["base_T_cam"] is None:
+            raise
+        obstacles = model.full(0.0)
+        normal = np.asarray(model.df.n)
+        across = np.cross([0.0, 0.0, 1.0], normal)
+        camera_pose = frame["base_T_cam"]
+        original = ai.get_state()
+        pos, quat = np.asarray(original["ee_pos"][:3]), original["ee_pos"][3:7]
+        tool_rotation = R.from_quat(quat)
+        # Translate 4 cm across the vertical bar and 3 cm outward, aiming back toward the
+        # same point. The outward margin also gives the checked move more door clearance.
+        distance = float(np.linalg.norm(model.door["closed_handle"] - camera_pose[:3, 3]))
+        yaw = np.arctan2(0.04, distance + 0.03)
+        for side in (1, -1):
+            state = ai.get_state()
+            target = pos + 0.03 * normal + side * 0.04 * across
+            rotation = (R.from_rotvec(side * yaw * np.array([0.0, 0.0, 1.0])) * tool_rotation).as_quat()
+            label = f"wrist handle re-look {side:+d}"
+            goal = pl.free(target, rotation, label, obstacles, blend=0.0)
+            planner.search()
+            motion, why = planner.motion(
+                [goal], state["position"], start_pose=(state["ee_pos"][:3], state["ee_pos"][3:7]), from_arm=True
+            )
+            if motion is None:
+                say(f"  {label}: {why}")
+                continue
+            planner.join(motion, obstacles, label, speed=0.10)
+            if not planner.run(motion, label):
+                raise Refused(f"{label} did not reach the checked pose.") from first
+            camera.require_frames_after_now()
+            try:
+                return detect(ai)
+            except shared.NoHandleProposal:
+                continue
+        raise shared.NoHandleProposal(f"{first}; the checked wrist re-looks had no usable proposal.") from first
+
+
+class GraspUnconfirmed(Refused):
+    """The fingers did not stop at the expected handle width."""
+
+
+def confirm_grasp(ai):
+    if ai.gripper(1.0, force=F.GRASP_FORCE) is False:
+        raise Refused("Gripper close did not complete -- refusing to pull.")
+    grip = ai.gripper_state() if hasattr(ai, "gripper_state") else None
+    position = float(grip.position if grip is not None else ai.get_state()["gripper_pos"])
+    gap = F.GRIPPER_STROKE_M * (1.0 - position)
+    current = f", motor current {grip.current:.3f}" if grip is not None and np.isfinite(grip.current) else ""
+    say(f"  gripper after close: {position:.3f}, estimated gap {gap * 1000:.1f} mm{current}")
+    if grip is not None and not grip.present:
+        raise Refused("Gripper feedback unavailable -- refusing to pull.")
+    if not F.GRASP_GAP_MIN_M <= gap <= F.GRASP_GAP_MAX_M:
+        P._release(ai)
+        if 0.0 <= gap < F.GRASP_GAP_MIN_M:
+            raise GraspUnconfirmed(
+                f"Grasp unconfirmed (empty close, estimated gap {gap * 1000:.1f} mm). Gripper opened."
+            )
+        raise Refused(
+            f"Grasp unconfirmed (closure too wide or invalid, estimated gap {gap * 1000:.1f} mm). Gripper opened."
+        )
+
+
+def retry_grasp_view(ai, planner, plan):
+    """Retreat through the insertion corridor and return to the original viewing pose."""
+    approach = plan["approach"]
+    insertion = approach.goals[-1]
+    lineup = approach.goals[-2]
+    st = ai.get_state()
+    planner.search()
+    retreat_goal = pl.line(lineup.pos, lineup.quat, "back to the line-up", insertion.world, contact=False)
+    view_pos, view_quat = planner.tool(approach.q0)
+    view_goal = pl.to_joints(approach.q0, view_pos, view_quat, "back to the wrist look", lineup.world)
+    retreat, why = planner.motion(
+        [retreat_goal, view_goal],
+        st["position"],
+        start_pose=(st["ee_pos"][:3], st["ee_pos"][3:7]),
+        from_arm=True,
+    )
+    if retreat is None:
+        raise Refused(f"Grasp retry could not retreat: {why}")
+    planner.join(retreat, plan["model"].cabinet())
+    if not planner.run(retreat, "back to the wrist look"):
+        raise Refused("Grasp retry could not reach the wrist look.")
+
+
+def can_replan_swing(plan, measured_deg, end_error):
+    """Allow the adaptive push to recover a small endpoint miss after a completed, fitted pull."""
+    after = plan.get("after")
+    if after is None:
+        return False
+    if measured_deg >= F.SWING_REPLAN_MIN_DEG:
+        return True
+    return (
+        isinstance(after, PushOpen)
+        and measured_deg >= plan["swing_deg"] - F.SWING_ANGLE_TOL_DEG
+        and end_error <= F.SWING_RECOVERY_MAX_ERROR_M
+    )
 
 
 def execute_open(ai, planner, plan, *, fast=False):
-    """Approach; the swing under joint impedance, the gripper closing on the bar as it starts (GRIP_DURING_SWING), to a
-    stop at exactly the angle asked for; then the gripper opens there, the hand still (push_open._release). What
-    follows is planned again from where that leaves the arm. A swing the driver ran to its end that left the door short
-    of its angle (at least SWING_REPLAN_MIN_DEG, the hinge fitted from its arc) lets go too, and what follows is then
-    planned only against the door as measured (plan["after"].replan). Returns True when the hand let go; False when
-    it stopped holding the handle; raises Refused."""
+    """Approach, confirm closure, swing under impedance, then release at rest."""
     cand, model = plan["cand"], plan["model"]
     st = ai.get_state()
     if float(st["gripper_pos"]) > 0.2:
         say("gripper is closed -- opening it first")
-        ai.gripper(0.0)
-        if float(ai.get_state()["gripper_pos"]) > 0.2:
-            raise Refused("Gripper still closed after opening -- refusing to grasp.")
+        P._release(ai)
     if not planner.run(plan["approach"], "approach"):
         raise Refused("Did not reach the grasp -- ABORT before closing the gripper.")
     e = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - cand["pos"]))
     say(f"grasp: tracking {e * 100:.1f} cm")
     if e > GRASP_TRACK_ABORT_M:
         raise Refused(f"Tracking {e * 100:.1f} cm at the grasp -- ABORT, gripper untouched.")
-    # the closed door, for the close (door_mid written even when None, so a stale one can't linger)
+    confirm_grasp(ai)
     dc.DOOR_FILE.unlink(missing_ok=True)
-    relocalize.ref_file().unlink(missing_ok=True)  # the close's reference was of the last door file
+    relocalize.ref_file().unlink(missing_ok=True)
     save_door_geometry(**plan["door"], door_mid=plan.get("door_mid"))
-    if not F.GRIP_DURING_SWING:
-        _close_gripper(ai)
-        g = float(ai.get_state()["gripper_pos"])
-        say(f"gripper after close: {g:.4f} (can't confirm a grasp on this rig -- watch it)")
-        if g < 0.2:
-            raise Refused("Gripper is OPEN -- nothing grasped. Refusing to swing.")
 
     # the swing (and what follows it) from where the arm really is, if that is off the plan: a new search (the time the
     # detection and the approach took doesn't count against it)
@@ -1195,23 +1291,16 @@ def execute_open(ai, planner, plan, *, fast=False):
         # same swing end: checking it again would only repeat that (it held the arm still ~6 s at the handle, 11-12)
         say(f"  the grasp is on the plan ({off:.1f} deg off): the swing and what follows it as planned up front")
     save_door_geometry(**plan["hinge_fields"])
-    # Push-open preflight already joined and collision-checked the unchanged pull.
-    # A pull rebuilt from the measured grasp still needs its own join.
+    # Reuse the checked preflight pull when the measured grasp agrees.
     if sw.joined is None:
         planner.join(sw, model.cabinet())
-    events = [(0.0, partial(_close_gripper, ai))] if F.GRIP_DURING_SWING else []
-    say(
-        f"swing {plan['swing_deg']} deg"
-        + (", the gripper closing as it starts" if F.GRIP_DURING_SWING else "")
-        + f", to a stop there ({float(sw.joined.t[-1]):.1f} s); then the gripper opens"
-    )
+    say(f"swing {plan['swing_deg']} deg, to a stop there ({float(sw.joined.t[-1]):.1f} s); then the gripper opens")
     # the door, not the plan, sets where the hand ends (F.SWING_END_TOL_M): judged by the angle it reached
     with ArcTrace(ai) as arc:
         ok = planner.run(
             sw,
             "swing",
             impedance={**F.PULL_GAINS, "path_tol": F.PULL_PATH_TOL_RAD},
-            events=events,
             tol=F.SWING_END_TOL_M,
         )
     finished = planner.finished  # the driver ran the whole swing (no stop), wherever the hand ended
@@ -1224,7 +1313,8 @@ def execute_open(ai, planner, plan, *, fast=False):
         ok = False
     # ran to its end but short: what follows was planned for a door at swing_deg -- let go and plan it again against
     # the door as measured (F.SWING_REPLAN_MIN_DEG), never run the old plan
-    replan = not ok and finished and fitted and deg >= F.SWING_REPLAN_MIN_DEG and plan.get("after") is not None
+    end_error = float(np.linalg.norm(np.asarray(final["ee_pos"][:3]) - sw.goals[-1].pos))
+    replan = not ok and finished and fitted and can_replan_swing(plan, deg, end_error)
     say(
         f"SWING {'DONE' if ok else 'SHORT' if replan else 'STOPPED SHORT'}: door ~{deg:.1f} deg, "
         f"EE {np.round(final['ee_pos'][:3], 4)}, gripper {float(final['gripper_pos']):.2f}"
@@ -1460,6 +1550,8 @@ def run(
     staging=None,
     progress=None,
     detect_at_dock=None,
+    detect_at_start=None,
+    detect_retry=None,
     allow_short_handoff=False,
     short_reentry=False,
     fast=False,
@@ -1525,7 +1617,8 @@ def run(
         if predictive:
             geom, q0, prediction = _predictive_dock(detect_at_dock, planner, make_after, swing, staging, adaptive_pull)
         else:
-            geom, q0 = detect(ai) if detect_at_dock is None else detect_at_dock()
+            detect_initial = detect_at_dock or detect_at_start or partial(detect, ai)
+            geom, q0 = detect_initial()
         h, n = geom["h_raw"], geom["n"]
         start = f"Start joints {np.round(np.degrees(q0), 1)}."
         try:
@@ -1572,7 +1665,24 @@ def run(
             if save_door:
                 save_planned_door(plan, push, after)
             return True
-        if not execute_open(ai, planner, plan, fast=fast):
+        try:
+            swung = execute_open(ai, planner, plan, fast=fast)
+        except GraspUnconfirmed as first:
+            say(f"  {first} Taking one new wrist look before trying again.")
+            retry_grasp_view(ai, planner, plan)
+            try:
+                geom, q0 = detect(ai) if detect_retry is None else detect_retry()
+            except Refused as e:
+                raise GraspUnconfirmed(f"{first} The retry wrist look failed: {e}") from e
+            geom = dict(geom, grasp_retry=True)
+            after = make_after()
+            plan = plan_open(
+                planner, geom, q0, swing, after, staging=staging, adaptive_pull=adaptive_pull, progress=progress
+            )
+            plan.update(after=after, hinge_fields=geom["hinge_fields"], door_mid=geom["door_mid"])
+            LAST_PLAN = dict(plan, geom=geom, q0=q0)
+            swung = execute_open(ai, planner, plan, fast=fast)
+        if not swung:
             holding = float(ai.get_state()["gripper_pos"]) > 0.2
             say(
                 "swing did not finish -- stopping "

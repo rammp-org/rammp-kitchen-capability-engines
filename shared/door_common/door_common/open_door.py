@@ -348,6 +348,10 @@ def _looks_agree(a, b):
     return NORMAL_AGREE_DEG is None or _normal_angle_deg(a[2], b[2]) <= NORMAL_AGREE_DEG
 
 
+class NoHandleProposal(Refused):
+    """SAM 3 returned a synchronized frame with zero instances on every attempt."""
+
+
 def detect_handle():
     """Two agreeing looks. Returns (handle position, handle orientation, door normal, door_z, door_mid, hinge)."""
     cam = dc.camera()
@@ -356,12 +360,15 @@ def detect_handle():
     detector = MAKE_DETECTOR()
 
     def look(tag):
+        empty_proposals = 0
         for attempt in range(1, MAX_EMPTY_RETRIES + 1):
             _checkpoint()
             instances = None
             if HANDLE_SOURCE == "sam3" and hasattr(cam, "sam3_detect"):
                 # SAM 3 segments the newest image when asked: detect on that very frame (its depth, its camera pose)
                 instances, f = cam.sam3_detect()
+                if f is not None and not instances:
+                    empty_proposals += 1
                 if f is None:
                     say(f"  no SAM 3 mask with its RGB-D frame on look {tag} (retry {attempt}/{MAX_EMPTY_RETRIES})")
                     time.sleep(0.5)
@@ -370,6 +377,8 @@ def detect_handle():
                 f = cam.grab()
             if getattr(cam, "box_topic", "") and f["box"] is None:
                 det = None  # boxer has no usable microwave box yet (grab said why): retry, never YOLO instead
+            elif instances is not None and hasattr(detector, "detect_instances"):
+                det, f["handle_mask"] = detector.detect_instances(instances, f)
             else:
                 # handle_source "sam3": SAM 3 masks the handle on the wrist image (the door still comes from depth).
                 # A detector with pick_handle_mask chooses among SAM 3's instances (with the frame: its depth); else the
@@ -401,7 +410,8 @@ def detect_handle():
             time.sleep(0.5)
         else:
             why = getattr(detector, "last_miss", "")
-            raise Refused(f"NO DETECTION ({tag}) after {MAX_EMPTY_RETRIES} retries{': ' + why if why else ''}")
+            error = NoHandleProposal if tag == "1" and empty_proposals == MAX_EMPTY_RETRIES else Refused
+            raise error(f"NO DETECTION ({tag}) after {MAX_EMPTY_RETRIES} retries{': ' + why if why else ''}")
         say(
             f"  look {tag}: handle {np.round(det['handle'], 4)}  hinge {_rounded(det['hinge'], 4)}  "
             f"door normal {np.round(det['normal'], 3)}  door z {_rounded(det['door_z'], 3)}"

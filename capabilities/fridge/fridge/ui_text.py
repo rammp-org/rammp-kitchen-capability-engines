@@ -156,7 +156,7 @@ _REFUSALS = (
         "Try again.",
     ),
     (
-        r"Gripper is OPEN -- nothing grasped",
+        r"Gripper is OPEN -- nothing grasped|Grasp unconfirmed \(empty close",
         "The gripper closed on nothing, so the arm didn't pull.",
         None,
         "Check the hand is around the handle; move the arm away (teleop) and try again.",

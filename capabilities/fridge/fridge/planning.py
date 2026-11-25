@@ -249,7 +249,7 @@ class Planner:
             "fridge node (or another capability) planning at the same time? Nothing was planned."
         )
 
-    def preflight_start(self, obstacles, measured, staging):
+    def preflight_start(self, obstacles, measured, staging, *, grasp_retry=False):
         """Ask cuRobo to validate the measured start with all collision layers active."""
         self.push_world(obstacles, "the closed fridge")
         q = list(map(float, measured))
@@ -257,6 +257,23 @@ class Planner:
         if checked.success:
             return None
         text = " ".join(str(checked.message).split())
+        if grasp_retry and "LIBRARY_VALIDATION_FAILED" in text and "velocity" in text:
+            # A joint plan back to the identical measured state can take a detour and fail its velocity check.
+            # The retry needs only a stationary collision and joint-limit check in the same full world.
+            positions = np.tile(q, (3, 1))
+            hold = LocalPlan(
+                True, "stationary wrist retry", np.array([0.0, 0.02, 0.04]), positions, np.zeros_like(positions)
+            )
+            stationary = self._ask(
+                lambda: self.arm.blend(
+                    [hold], [], speed_scale=[1.0], hold=[HOLD_NONE], hold_orientation=[None], **self.request_kwargs()
+                ),
+                "check stationary wrist retry",
+            )
+            if stationary.success:
+                say("  wrist retry start validated as a stationary trajectory")
+                return None
+            text = f"{text}; stationary check: {' '.join(str(stationary.message).split())}"
         if "START_STATE_WORLD_COLLISION" not in text:
             raise StartNotClear(f"could not validate the measured open start: {text}")
         blockers = [

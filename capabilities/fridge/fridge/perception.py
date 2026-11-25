@@ -131,8 +131,22 @@ class HandleDetector(door_common.perception.HandleDetector):
         best-scoring instead -- on 11-04 that was a screwdriver on the bench, or a sideways handle on a door or
         cabinet across the room. An instance needs depth on it to be measured: one without (beyond the depth range,
         like those across the room) is not taken -- the handle within reach always had it (11-04: every look)."""
+        found, why = self._handle_candidates(instances, frame)
         if not instances:
             return None
+        if not found:
+            self.last_miss = f"no SAM 3 instance of {len(instances)} is handle-like ({'; '.join(why)})"
+            say(f"  {self.last_miss}")
+            return None
+        px, score, mask, label, what = max(found, key=lambda t: t[0])
+        say(f"  SAM 3: '{label}' {score:.2f}, {px} px, {what} -- of {len(instances)} instance(s)")
+        group = _merge_inside(mask, [m for _, m, _ in instances])
+        front = self._bar_in_front(mask, instances, frame)
+        self._merged = (front, group)  # _normal_from_handle fits the bar and its plate together
+        return front
+
+    def _handle_candidates(self, instances, frame):
+        """Return proposals with plausible metric dimensions and the rejected proposals' diagnostics."""
         found, why = [], []
         for score, mask, label in instances:
             px = int(np.count_nonzero(mask))
@@ -149,16 +163,7 @@ class HandleDetector(door_common.perception.HandleDetector):
                 continue
             height, width, rng = size
             found.append((px, score, mask, label, f"{height * 100:.0f} x {width * 100:.0f} cm at {rng:.2f} m"))
-        if not found:
-            self.last_miss = f"no SAM 3 instance of {len(instances)} is handle-like ({'; '.join(why)})"
-            say(f"  {self.last_miss}")
-            return None
-        px, score, mask, label, what = max(found, key=lambda t: t[0])
-        say(f"  SAM 3: '{label}' {score:.2f}, {px} px, {what} -- of {len(instances)} instance(s)")
-        group = _merge_inside(mask, [m for _, m, _ in instances])
-        front = self._bar_in_front(mask, instances, frame)
-        self._merged = (front, group)  # _normal_from_handle fits the bar and its plate together
-        return front
+        return found, why
 
     def _bar_in_front(self, mask, instances, frame):
         """`mask`, or -- when SAM 3 gave the bar and its plate apart and `mask` is the plate -- the bar: the instance

@@ -94,8 +94,7 @@ PARAMS = {
     "depth_topic": "/wrist_camera/depth/image_rect_raw",
     "camera_frame": "",
     # which camera finds the handle and measures the door: "wrist" (color_topic, camera_info_topic, depth_topic: what
-    # every executed open has used, and what GRIP_EXT was tuned on) or "scene" (the scene_* topics below, as the side
-    # grasp measured the door on 11-06; its handle point is not the wrist camera's: GRIP_EXT is unchecked with it)
+    # every executed open has used) or "scene" (the scene_* topics below)
     "detect_camera": "wrist",
     # where the handle comes from: "sam3" (SAM 3's mask of sam3_prompts, from sam3_service) or "depth" (the vertical bar
     # sticking out of the door)
@@ -106,7 +105,8 @@ PARAMS = {
     # taken as square to the arm). handle_model and handle need handle_source sam3
     "door_normal": "handle_model",
     "sam3_service": "/perception/sam3/detect",
-    "sam3_prompts": ["handle"],
+    # Nov 16 replays recovered bar and bracket silhouettes with complementary handle prompts.
+    "sam3_prompts": ["handle", "door handle", "black handle"],
     "sam3_threshold": 0.3,
     **constants.MEASURED,
     "hinge_side": "left",
@@ -639,7 +639,7 @@ class Capability(CapabilityEngine):
             finally:
                 dc.set_camera(camera)
 
-    def _dock_open(self, ctx, world, camera, speed, cfg, *, guided=False, autonomous=True, preview=None):
+    def _dock_open(self, ctx, world, camera, speed, cfg, *, planner=None, guided=False, autonomous=True, preview=None):
         if self.cfg["door_normal"] == "square":
             raise dc.Refused("Docking needs a measured door normal")
         if not np.allclose(self.cfg["chair_back_dir"], [1.0, 0.0]):
@@ -695,6 +695,10 @@ class Capability(CapabilityEngine):
 
             def wrist_look():
                 camera.require_frames_after_now()
+                if planner is not None and self.cfg["door_normal"] == "handle_model":
+                    return open_door.detect_with_wrist_relook(
+                        self.arm, planner, camera, lambda: detected[0]["closed_model"]
+                    )
                 return open_door.detect(self.arm)
 
             return docking.confirm_wrist(self.base, self.arm, detected, wrist_look, odom, mode_entered=self._drove)
@@ -856,12 +860,56 @@ class Capability(CapabilityEngine):
             def dock_then_contact(preview=None):
                 if guidance_requested:
                     detected = self._dock_open(
-                        ctx, world, camera, base_speed, self.cfg, guided=True, autonomous=docking_requested
+                        ctx, world, camera, base_speed, self.cfg, planner=planner, guided=True, autonomous=docking_requested
                     )
                 else:
-                    detected = self._dock_open(ctx, world, camera, base_speed, base_cfg, preview=preview)
+                    detected = self._dock_open(ctx, world, camera, base_speed, base_cfg, planner=planner, preview=preview)
                 contact.enter_context(self._contact_expected(execute))
                 return detected
+
+            def start_wrist():
+                def scene_model():
+                    topics = tuple(
+                        self.cfg[k] for k in ("scene_color_topic", "scene_camera_info_topic", "scene_depth_topic")
+                    )
+                    if not all(topics):
+                        raise dc.Refused("The scene camera topics are unavailable.")
+                    scene = WristCamera(
+                        self,
+                        *topics,
+                        rammp_arm.FRAME,
+                        sam3=self.sam3,
+                        sam3_prompts=self.cfg["sam3_prompts"],
+                        sam3_threshold=self.cfg["sam3_threshold"],
+                    )
+                    dc.set_camera(scene)
+                    try:
+                        geom, _ = open_door.detect(self.arm, for_docking=True)
+                        return geom["closed_model"]
+                    finally:
+                        dc.set_camera(camera)
+
+                return open_door.detect_with_wrist_relook(self.arm, planner, camera, scene_model)
+
+            def retry_wrist():
+                if self.cfg["detect_camera"] == "wrist":
+                    return open_door.detect(self.arm)
+                wrist = WristCamera(
+                    self,
+                    self.cfg["color_topic"],
+                    self.cfg["camera_info_topic"],
+                    self.cfg["depth_topic"],
+                    rammp_arm.FRAME,
+                    self.cfg["camera_frame"],
+                    sam3=self.sam3,
+                    sam3_prompts=self.cfg["sam3_prompts"],
+                    sam3_threshold=self.cfg["sam3_threshold"],
+                )
+                dc.set_camera(wrist)
+                try:
+                    return open_door.detect(self.arm)
+                finally:
+                    dc.set_camera(camera)
 
             if action_id == "open":
                 detect_open = dock_then_contact if may_dock else None
@@ -892,6 +940,10 @@ class Capability(CapabilityEngine):
                     staging=np.radians(self.cfg["start_joints_deg"]),
                     progress=lambda fraction, message: ctx.progress(action_id, fraction, message, pausable=False),
                     detect_at_dock=detect_open,
+                    detect_at_start=start_wrist
+                    if execute and self.cfg["detect_camera"] == "wrist" and self.cfg["door_normal"] == "handle_model"
+                    else None,
+                    detect_retry=retry_wrist,
                     allow_short_handoff=docking_requested,
                     short_reentry=bool(params.get("short_reentry", fast)),
                     fast=fast,

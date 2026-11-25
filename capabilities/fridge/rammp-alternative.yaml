@@ -58,7 +58,7 @@ params:
   # sticking out of the door). door_normal handle_model and handle need sam3.
   handle_source: sam3
   sam3_service: /perception/sam3/detect
-  sam3_prompts: [handle]
+  sam3_prompts: [handle, door handle, black handle]
   sam3_threshold: 0.3
   # Measured on the fridge being opened (m); see Before a run in docs/interface.md.
   # The STL's bar middle; set from the 11-06 measurements once the camera's handle point is measured (TESTING.md).

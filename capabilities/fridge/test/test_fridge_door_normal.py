@@ -116,3 +116,33 @@ def test_handle_height_only_uses_model_for_anchored_partial_bar(support, bounds,
     z, _, reason = dn._handle_height(fit, bounds)
     assert z == pytest.approx(np.mean(bounds))
     assert reason == source
+
+
+def test_real_wrist_top_proposals_recover_a_rejected_primary(monkeypatch):
+    # This fit uses NumPy and SciPy. Open3D is used by the generic plane detector.
+    import sys
+    from types import ModuleType
+
+    try:
+        import open3d  # noqa: F401
+    except ImportError:
+        monkeypatch.setitem(sys.modules, "open3d", ModuleType("open3d"))
+
+    path = Path(__file__).parent / "fixtures" / "nov16_wrist_3_proposals.npz"
+    with np.load(path) as data:
+        frame = {key: data[key] for key in ("K", "depth_mm", "base_T_cam")}
+        frame["rgb"] = np.zeros((*frame["depth_mm"].shape, 3), np.uint8)
+        instances = sorted(
+            zip(data["scores"], np.unpackbits(data["masks"], axis=-1).astype(bool), data["labels"], strict=True),
+            key=lambda item: -item[0],
+        )
+    detector = dn.make_detector()
+    primary = detector.pick_handle_mask([i for i in instances if i[2] == "handle"], frame)
+    assert primary is not None
+    with pytest.raises(dn.DoorNormalError, match="of the model"):
+        dn.measure_door_normal(frame["depth_mm"], frame["K"], frame["base_T_cam"], primary, door_standoff_m=0.070)
+    detection, mask = detector.detect_instances(instances, frame)
+    assert detection is not None
+    assert not np.array_equal(mask, primary)
+    assert detector.last_door_normal.yaw_deg == pytest.approx(10.3, abs=0.6)
+    assert detection["handle"] == pytest.approx([0.860, -0.269, 0.337], abs=0.009)

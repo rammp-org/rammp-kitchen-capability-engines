@@ -5,23 +5,28 @@ from door_common.common import Refused, say
 from scipy.spatial.transform import Rotation
 
 DEFAULT_BOX_BUDGET = 60
-# Gen3's 0.902 m nominal reach, plus the hand, collision spheres and margin.
+# Upper bound for Gen 1.5: sum each collision link's URDF origin lengths from arm_mount
+# and add its sphere center norm, radius and buffer. The farthest fingertip bound is 1.408 m.
 # Use the whole reachable volume because free-space plans may leave the TCP corridor.
-ARM_SWEEP_RADIUS_M = 1.25
+ARM_SWEEP_RADIUS_M = 1.42
 MERGE_GAP_M = 0.04
 MERGE_EXTRA_VOLUME = 0.10
 
 
 def _distance(box, padding):
-    rotation = Rotation.from_euler("xyz", box["rpy_deg"], degrees=True)
-    local_origin = rotation.inv().apply(-np.asarray(box["position"]))
-    return float(np.linalg.norm(np.maximum(np.abs(local_origin) - np.asarray(box["dims"]) / 2 - padding, 0)))
+    dims, position, angles = np.asarray([box["dims"], box["position"], box.get("rpy_deg", (0, 0, 0))], float)
+    if not np.isfinite([dims, position, angles]).all() or np.any(dims <= 0):
+        raise Refused(f"Invalid kitchen collision box {box['name']}.")
+    rotation = Rotation.from_euler("xyz", angles, degrees=True)
+    local_origin = rotation.inv().apply(-position)
+    return float(np.linalg.norm(np.maximum(np.abs(local_origin) - dims / 2 - padding, 0)))
 
 
 def _merge(a, b, padding):
-    if not np.allclose(a["rpy_deg"], b["rpy_deg"], rtol=0, atol=1e-10):
+    angles = a.get("rpy_deg", (0, 0, 0))
+    if not np.allclose(angles, b.get("rpy_deg", (0, 0, 0)), rtol=0, atol=1e-10):
         return None
-    rotation = Rotation.from_euler("xyz", a["rpy_deg"], degrees=True)
+    rotation = Rotation.from_euler("xyz", angles, degrees=True)
     centers = rotation.inv().apply([a["position"], b["position"]])
     halves = np.asarray([a["dims"], b["dims"]]) / 2
     lo, hi = centers - halves, centers + halves
@@ -36,7 +41,7 @@ def _merge(a, b, padding):
     return dict(
         name=f"{a['name']}+{b['name']}",
         position=rotation.apply((lower + upper) / 2).tolist(),
-        rpy_deg=a["rpy_deg"],
+        rpy_deg=list(angles),
         dims=(dims + 1e-9).tolist(),
     )
 

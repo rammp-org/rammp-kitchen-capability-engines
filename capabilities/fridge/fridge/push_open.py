@@ -25,6 +25,8 @@ where it really is. Without drive_base the goal ends there, asking for the move 
 chair_moved then pushes (push_after_chair_move).
 """
 
+from dataclasses import replace
+
 import numpy as np
 from door_common.common import DoorFrame, Refused, save_door_geometry, say
 from scipy.spatial.transform import Rotation as R
@@ -36,6 +38,8 @@ from .close_door import _box_gap, _hand_points, move_chair
 from .door_sweep import DoorSweep, SweepBlocked, push_minimum
 from .motion import load_door, opened, shifted
 from .world import FridgeModel, hand_reach
+
+RELEASE_CLEARANCE_M = 0.05
 
 NEXT_STEP = ""  # what the person does next, said where the goal was sent (the node reads it): the wheelchair move
 FINAL_ANGLE_DEG = None  # target of a successful planned or completed push
@@ -318,6 +322,8 @@ def plan_finished_push(
         )
         if push is not None:
             return push, placed, f"then {out * 100:.0f} cm in front of the fridge, facing it"
+        if "START_STATE" in placed:
+            return None, placed, ""
         no_finish = placed
     push, placed = plan_push(
         planner,
@@ -474,6 +480,7 @@ class PushOpen:
                 moved, route = door, model.full(deg0)
             else:
                 moved, route = shifted(door, move, self.chair_dir), swept_world(door, move, self.chair_dir)
+            candidate_off = off
             push, placed, finish = plan_finished_push(
                 planner,
                 moved,
@@ -484,6 +491,33 @@ class PushOpen:
                 end_deg=end_deg,
                 short_reentry=self.short_reentry and move == 0,
             )
+            # The release window permits the normal back-off, but its endpoint can still overlap the
+            # restored door or handle padding after the measured hinge has shifted.
+            if push is None and from_arm and "INVALID_START_STATE_WORLD_COLLISION" in placed:
+                normal = np.r_[model.df._rot(deg0) @ model.df.n, 0.0]
+                clearance = pl.line(
+                    off_pose[0] + normal * RELEASE_CLEARANCE_M,
+                    off_pose[1],
+                    "clear the padded door after release",
+                    backs[0].world,
+                    contact=False,
+                )
+                say(f"  the full door world refused the back-off endpoint: {placed}")
+                extra, why = planner.motion([clearance], off.q_end, start_pose=off_pose)
+                if extra is None:
+                    continue
+                push, placed, finish = plan_finished_push(
+                    planner,
+                    moved,
+                    extra.q_end,
+                    (clearance.pos, clearance.quat),
+                    route,
+                    FridgeModel(moved),
+                    end_deg=end_deg,
+                )
+                # Preserve the individually checked contact-window path and its clearance endpoint.
+                retreat_goals = [replace(goal, blend=0.0) for goal in off.goals]
+                candidate_off = pl.Motion(retreat_goals + extra.goals, off.legs + extra.legs, off.q0)
             if push is None:
                 why = placed
                 continue
@@ -493,9 +527,12 @@ class PushOpen:
             self.end_deg = end_deg
             self.release_geometry = release_geometry(model, deg0)
             if move == 0:
-                self.motion, self.push = pl.Motion(off.goals + push.goals, off.legs + push.legs, off.q0), None
+                self.motion, self.push = (
+                    pl.Motion(candidate_off.goals + push.goals, candidate_off.legs + push.legs, candidate_off.q0),
+                    None,
+                )
             else:
-                self.motion, self.push = off, push
+                self.motion, self.push = candidate_off, push
             return True, f"push-open OK, {_after(move)} ({self.describe()}); the push to {end_deg:g} deg {self.finish}"
         if len(routes) == 1 and routes[0][0] == 0.0:
             return False, (
@@ -593,12 +630,12 @@ def _release(ai, *, early=False):
     reported position (its joint state, not a camera) still says closed after the command: backing off then would drag
     the door."""
     if early:
-        cleared = ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED, open_threshold=0.2)
-        position = ai.gripper_state().position if cleared else float("inf")
+        opened = ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED, open_threshold=0.2)
+        position = ai.gripper_state().position if opened else float("inf")
     else:
-        ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED)
+        opened = ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED)
         position = ai.get_state()["gripper_pos"]
-    if not float(position) <= 0.2:
+    if opened is False or not 0.0 <= float(position) <= 0.2:
         raise Refused("the gripper did not open -- the hand is still on the handle.")
 
 

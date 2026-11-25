@@ -194,7 +194,7 @@ class WristCamera:
         """SAM 3 on this camera's colour image: (instances as sam3_handle_instances, the RGB-D frame they are masks
         of, as `grab` returns it). SAM 3 segments the newest image on the topic when the request reaches it, not a
         frame grabbed before asking, so the frame is the buffered one with the reply's stamp. ([], None) (says why)
-        without a service, a reply, an instance, or that frame still buffered."""
+        without a service, a reply, or that frame still buffered. ([], frame) for a synchronized empty reply."""
         if self._sam3 is None:
             return [], None
         if not self._sam3.wait_for_service(timeout_sec=2.0):
@@ -213,14 +213,14 @@ class WristCamera:
             say(f"  SAM 3: {resp.message}")
             return [], None
         objs = sorted((o for o in resp.detections.objects if o.mask_id > 0), key=lambda o: -o.score)
-        if not objs:
-            say(f"  SAM 3 found no {' / '.join(self.sam3_prompts)} ({resp.message})")
-            return [], None
         frame = self.frame_at(resp.detections.header.stamp)
         if frame is None:
             stamp = _stamp_s(resp.detections.header.stamp)
             say(f"  SAM 3's image ({stamp:.3f}) is not among the buffered RGB-D frames (dropped by the sync, or old)")
             return [], None
+        if not objs:
+            say(f"  SAM 3 found no {' / '.join(self.sam3_prompts)} ({resp.message})")
+            return [], frame
         li = resp.detections.label_image
         if (li.height, li.width) != frame["rgb"].shape[:2]:
             say(f"  SAM 3's mask is {li.width}x{li.height}, the frame {frame['rgb'].shape[1]}x{frame['rgb'].shape[0]}")

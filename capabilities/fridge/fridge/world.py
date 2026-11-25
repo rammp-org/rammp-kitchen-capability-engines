@@ -242,6 +242,8 @@ class PlannerWorld:
                     settings = config.get("planner", {})
                     budget = int(settings.get("collision_cache_obb", budget))
                     padding = float(settings.get("world_padding", padding))
+                    if budget < 1 or not np.isfinite(padding) or padding < 0:
+                        raise ValueError("invalid collision cache capacity or world padding")
                     layers = {(path.parent / name).resolve() for name in [*config.get("layers", []), *self.base_layers]}
                     for layer in layers:
                         reserved += len(yaml.safe_load(layer.read_text())["obstacles"])

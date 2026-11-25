@@ -1,6 +1,6 @@
 """The fridge's planning on FakeCurobo (fridge_fake.py): what reaches cuRobo (the worlds, the legs,
-the joined motions), what the arm is sent (one trajectory per motion, impedance, the gripper while
-it moves) and what the door file says after. Collisions are cuRobo's and are not checked here
+the joined motions), what the arm is sent (one trajectory per motion, impedance, the gripper
+before and after the pull) and what the door file says after. Collisions are cuRobo's concern
 (data/curobo_sim's GPU harness does)."""
 
 import json
@@ -302,8 +302,7 @@ def test_the_open_runs_each_motion_as_one_trajectory_and_lets_go_while_moving(fr
         assert kw["control_mode"] == IMPEDANCE and kw["gains"]["kq"] == F.PULL_GAINS["kq"]
     assert arm.sent[1]["path_tolerance"] == F.PULL_PATH_TOL_RAD
     assert arm.sent[2]["path_tolerance"] == F.AFTER_RELEASE_PATH_TOL_RAD
-    # the gripper: closes as the swing starts, opens slowly while it runs on (then is seen open
-    # before what follows)
+    # The gripper closes before the swing and opens slowly once the arm is at rest.
     assert arm.grips[0] == (1.0, F.GRASP_FORCE, None)
     assert arm.grips[1] == (0.0, None, F.GRIP_OPEN_SPEED)
     door = json.loads(dc.DOOR_FILE.read_text())
@@ -349,7 +348,7 @@ def test_the_swing_stops_at_the_angle_asked_for_then_lets_go(fridge):
     assert all(
         abs(open_door.hand_angle(plan["door"], [*p, *q])) <= 60 + 1e-6 for p, q in goal.through
     )
-    # approach; close as the swing starts; the swing; THEN open (the arm still); then the back-off
+    # Approach, close, swing, open at rest, and then back off.
     seq = order
     assert [k for k, _ in seq] == ["move", "grip", "move", "grip", "move"], order
     assert seq[1][1] == 1.0 and seq[3][1] == 0.0
@@ -417,6 +416,8 @@ def test_a_dry_open_with_save_door_leaves_the_door_as_the_planned_open_would(fri
 def test_release_only_backs_off_the_handle(fridge):
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, False, save_door=True)
+    # A stopped pull leaves the hand on the bar at the swing endpoint.
+    arm.q = open_door.LAST_PLAN["swing"].q_end.copy()
     arm.gripper_pos = 0.8
     assert open_door.run(arm, planner, True, release_only=True)
     assert arm.grips[-1][0] == 0.0 and len(arm.sent) == 1

@@ -217,7 +217,7 @@ ICP_HUBER_M = 0.003  # Huber's knee on the point-to-plane residual
 ICP_YAW_STARTS_DEG = (-20.0, 0.0, 20.0)  # starts tried (the best final cost wins)
 FIT_INLIER_M = 0.005  # a mask point within this of the fitted model counts as on it
 FIT_MIN_POINTS = 300  # fewer mask points with depth: the look fails
-FIT_MIN_INLIER_FRACTION = 0.6  # of the mask's points on the model's footprint, within FIT_INLIER_M of the model
+FIT_MIN_INLIER_FRACTION = 0.55  # of the mask's points on the model's footprint, within FIT_INLIER_M of the model
 # (11-06 still scene frames: 77-91%)
 FIT_REF_RANGE_M = 0.75  # FIT_INLIER_M and FIT_MAX_RMS_M hold at this camera range; farther, they grow with the
 # stereo depth noise, ~ range^2 (11-06: the handle at 0.93 m fit only 44-49% within 5 mm, 0.74 m fit fine)
@@ -637,6 +637,53 @@ def make_detector(handle_centre_to_face_m=0.070, **kwargs):
 
     class ModelNormalHandleDetector(perception.HandleDetector):
         last_door_normal = None
+
+        def detect_instances(self, instances, frame):
+            """Fit up to three distinct handle-sized proposals on this RGB-D frame."""
+            self.last_miss = ""
+            self.last_door_normal = None
+            candidates, why = self._handle_candidates(instances, frame)
+            if not candidates:
+                self.last_miss = "; ".join(why) if why else "no SAM 3 handle proposal"
+                return None, None
+            tested = []
+            best = None
+            misses = []
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            primary_index = next((i for i, item in enumerate(candidates) if item[3] == "handle"), None)
+            primary = None
+            if primary_index is not None:
+                candidates.insert(0, candidates.pop(primary_index))
+                primary = candidates[0][2]
+            for _, score, mask, label, _ in candidates:
+                is_primary = mask is primary
+                parts = [item for item in instances if item[2] == "handle"] if is_primary else instances
+                mask = self._bar_in_front(mask, parts, frame)
+                if any(np.count_nonzero(mask & other) >= 0.95 * np.count_nonzero(mask | other) for other in tested):
+                    continue
+                tested.append(mask)
+                detection = self.detect(
+                    frame["rgb"], frame["K"], frame["depth_mm"], frame["base_T_cam"], handle_mask=mask
+                )
+                fit = self.last_door_normal
+                if detection is not None and fit is not None:
+                    # Preserve the original pick when it still clears the original gate.
+                    original_fit = is_primary and fit.inlier_fraction >= 0.60
+                    support = fit.inlier_fraction * fit.footprint_fraction * fit.points
+                    quality = (original_fit, support, -fit.rms_m, score)
+                    if best is None or quality > best[0]:
+                        best = (quality, detection, mask, fit, label, score)
+                elif self.last_miss:
+                    misses.append(self.last_miss)
+                if len(tested) == 3:
+                    break
+            if best is None:
+                self.last_miss = "; ".join(misses)
+                return None, tested[0]
+            _, detection, mask, self.last_door_normal, label, score = best
+            self.last_miss = ""
+            say(f"  selected SAM 3 '{label}' {score:.2f} after fitting {len(tested)} proposal(s)")
+            return detection, mask
 
         def _normal_from_handle(self, mask, depth, K, base_T_cam):
             try:
