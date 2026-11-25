@@ -74,6 +74,7 @@ HOOK_DEFAULT_SPEED = 0.7
 HOOK_EARLY_PULL_SCALE = 0.90
 HOOK_EARLY_PULL_SPEEDUP = 0.90 / 0.595
 HOOK_SLOW_FROM_DEG = 60.0
+HOOK_FALLBACK_SETTLE_MARGIN_DEG = 3.0
 HOOK_LOAD_WINDOW_DEG = (83.0, 92.0)
 HOOK_MIN_HINGE_LOAD_NM = 0.08
 HOOK_MIN_LOAD_SAMPLES = 3
@@ -1826,6 +1827,7 @@ def run(
                     base_moves=BASE_MOVES,
                     allow_short_handoff=allow_short_handoff,
                     short_reentry=short_reentry,
+                    settle_margin_deg=HOOK_FALLBACK_SETTLE_MARGIN_DEG if hook and swing_deg is None else 0.0,
                 )
             return ReleaseAround() if around else ReleaseBackOff()
 

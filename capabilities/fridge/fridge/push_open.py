@@ -427,10 +427,19 @@ class PushOpen:
     """What follows the pull: plans the back-off, wheelchair move and push from the hand on the handle, the gripper
     open (`plan`), and runs them (`execute`), re-planned from where the pull really ended."""
 
-    def __init__(self, chair_dir=F.CHAIR_BACK_DIR, base_moves=True, *, allow_short_handoff=False, short_reentry=False):
+    def __init__(
+        self,
+        chair_dir=F.CHAIR_BACK_DIR,
+        base_moves=True,
+        *,
+        allow_short_handoff=False,
+        short_reentry=False,
+        settle_margin_deg=0.0,
+    ):
         self.chair_dir = chair_dir
         self.allow_short_handoff = allow_short_handoff
         self.short_reentry = short_reentry
+        self.settle_margin_deg = settle_margin_deg
         self.moves = F.CHAIR_MOVES_M if base_moves else (0.0,)  # base_moves false: the push from where the chair is
         self.chair_move = None
         self.motion = None  # back-off + push (no move), or the back-off alone (a move)
@@ -470,6 +479,13 @@ class PushOpen:
             boxes, padding = planner.world.door_sweep_boxes()
             sweep = DoorSweep(model, boxes, deg0, min(push_minimum(deg0), F.PUSH_OPEN_TO_DEG), padding)
             return False, str(SweepBlocked(sweep.obstacle() or "the chair keep-out", sweep))
+        if from_arm and self.settle_margin_deg and (0.0, F.PUSH_OPEN_TO_DEG) in routes:
+            # Add room for the door to settle when this push is replanned from
+            # the measured release. Keep the checked 90-degree path available.
+            end = F.PUSH_OPEN_TO_DEG + self.settle_margin_deg
+            boxes, padding = planner.world.door_sweep_boxes()
+            if DoorSweep(model, boxes, deg0, end, padding).obstacle() is None:
+                routes = ((0.0, end), *routes)
         backs = back_off_goals(model, deg0, hold_pose)
         off, why = planner.motion(backs, q_hold, start_pose=hold_pose, from_arm=from_arm)
         if off is None:
