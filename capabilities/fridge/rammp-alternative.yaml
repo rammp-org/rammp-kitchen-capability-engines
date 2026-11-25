@@ -180,8 +180,9 @@ params:
   docking_odom_to_axle_xy: [0.0, 0.0]
   # The UI bridge node whose request_user_input action and service show the UI buttons' panels (capability_engine).
   ui_bridge_node_name: ui_bridge_node
-publishes: [/fridge/status]
+publishes: [/fridge/status, /setpoint/joint_position]
 subscribes:
+  - /stream_status
   - /tf
   - /tf_static
   - /wrist_camera/color/image_raw

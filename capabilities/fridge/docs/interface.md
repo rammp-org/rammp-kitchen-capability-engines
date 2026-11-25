@@ -125,6 +125,10 @@ the free edge before the usual 16 cm waypoint. The planner checks both against t
 | `/wrist_camera/infra1/image_rect_raw`, `/wrist_camera/infra1/camera_info`, `/wrist_camera/infra2/image_rect_raw`, `/wrist_camera/infra2/camera_info` | `sensor_msgs/Image`, `CameraInfo`              | no       | The wrist camera's rectified stereo pair, recorded into the run's rosbag only (`wrist_infra*_topic`), for running FoundationStereo on later      |
 | `/perception/object_detections_3d`                                                                                                                   | `rammp_perception_interfaces/ObjectDetections` | no       | boxer's 3D boxes, recorded into the run's rosbag only (`boxes_topic`)                                                                            |
 
+Fast autonomous docking uses the arm driver's `/open_stream` and `/close_stream` services,
+publishes `rammp_arm_interfaces/JointSetpoint` on `/setpoint/joint_position`, and subscribes to
+`rammp_arm_interfaces/StreamStatus` on `/stream_status` while streaming.
+
 The camera subscriptions exist only while an action runs; the engine destroys them when it ends.
 `self.arm` subscribes to the arm driver's state topics the same way. The SAM 3 client
 (`handle_source: sam3`) is made once and lives as long as the node.
