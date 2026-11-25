@@ -105,6 +105,13 @@ clearance against the swept appliance and chair layers in time, the arm can move
 a ready pose during the terminal docking leg. A further docking correction first parks
 the arm on the checked reverse path.
 
+Set `profile: hook` on an `open` goal to try the checked stationary hook pull with
+the fast profile's speed defaults. The hook preflight has up to 12 s. If it
+declines before motion, the fast pull and push gets its usual planning budget.
+The hook uses partial finger closure and checks the arm's measured external
+wrench late in the pull. If the wrench cannot confirm retention, the arm stops
+before release. Determine the door's position before commanding another motion.
+
 Set `short_reentry: true` on an `open` goal to let the in-place push try a waypoint 8 cm beyond
 the free edge before the usual 16 cm waypoint. The planner checks both against the open door.
 

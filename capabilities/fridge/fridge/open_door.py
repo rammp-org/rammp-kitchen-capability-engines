@@ -68,6 +68,10 @@ HOOK_ANGLE_DEG = 94.0
 HOOK_CLOSURE = 0.82
 HOOK_FORCE = 0.15
 HOOK_BACK_OFF_M = 0.05
+HOOK_PREFLIGHT_S = 12.0
+HOOK_LOAD_WINDOW_DEG = (83.0, 92.0)
+HOOK_MIN_HINGE_LOAD_NM = 0.08
+HOOK_MIN_LOAD_SAMPLES = 3
 HOOK_LAGS_DEG = (55.0, 60.0, 45.0)
 REPLAN_DEG = 1.0  # after the grasp, the swing is planned again from the real joints if they are further than this off
 
@@ -410,6 +414,44 @@ class ArcTrace:
                     self.xy.append(np.asarray(st["ee_pos"][:2], float))
             except Exception:  # a missed sample only thins the fit
                 pass
+
+
+class HookLoadTrace(ArcTrace):
+    """Measure the arm wrench's resisting moment about the hinge during the last moving part of the pull."""
+
+    def __init__(self, ai, door):
+        super().__init__(ai)
+        self.door = door
+        self.hinge = np.asarray(door["hinge"], float)
+        self.sign = door["open_sign"]
+        self.samples = []
+
+    def sample(self):
+        st = self.ai.get_state()
+        pose = st["ee_pos"]
+        angle = self.sign * hand_angle(self.door, pose)
+        if not HOOK_LOAD_WINDOW_DEG[0] <= angle <= HOOK_LOAD_WINDOW_DEG[1]:
+            return
+        wrench = self.ai.ee_state()
+        if wrench.frame_id != "arm_mount":
+            return
+        # The driver reports the environment's external wrench at the flange in arm_mount.
+        radius = np.asarray(wrench.position) - self.hinge
+        moment = self.sign * (np.cross(radius, wrench.force)[2] + wrench.torque[2])
+        if np.isfinite(moment):
+            self.samples.append(float(moment))
+
+    def _sample(self):
+        while not self._stop.wait(1.0 / F.HINGE_FIT_HZ):
+            try:
+                self.sample()
+            except Exception:  # missing or stale feedback does not count as a loaded sample
+                pass
+
+    def retained(self):
+        load = -float(np.median(self.samples)) if self.samples else float("nan")
+        say(f"  hook late pull: {load:.3f} N m resisting hinge moment from {len(self.samples)} samples")
+        return len(self.samples) >= HOOK_MIN_LOAD_SAMPLES and load >= HOOK_MIN_HINGE_LOAD_NM
 
 
 def fit_circle(xy):
@@ -1276,7 +1318,7 @@ def execute_open(ai, planner, plan, *, fast=False):
     off = float(np.degrees(np.max(np.abs(pl._short_delta(sw.q0, st["position"])))))
     if off > REPLAN_DEG:
         if hook:
-            raise Refused("Hook pull start differs from preflight, stopping with the gripper open.")
+            raise GraspUnconfirmed("Hook pull start differs from preflight. The gripper is open.")
         say(f"  the grasp joints are {off:.1f} deg off the plan's -- planning the swing again from them")
         real = dict(cand, pos=np.asarray(st["ee_pos"][:3]), quat=np.asarray(st["ee_pos"][3:7]))
         sw, why = planner.motion(
@@ -1308,11 +1350,12 @@ def execute_open(ai, planner, plan, *, fast=False):
             raise Refused("Could not close to the hook position.")
         grip = ai.gripper_state() if hasattr(ai, "gripper_state") else None
         position = float(grip.position if grip is not None else ai.get_state()["gripper_pos"])
+        hook_closure_at_grasp = position
         if (grip is not None and not grip.present) or not np.isfinite(position) or position <= 0.2:
             raise Refused("No valid closed gripper feedback after the hook command.")
     say(f"swing {plan['swing_deg']} deg, to a stop there ({float(sw.joined.t[-1]):.1f} s); then the gripper opens")
     # the door, not the plan, sets where the hand ends (F.SWING_END_TOL_M): judged by the angle it reached
-    with ArcTrace(ai) as arc:
+    with HookLoadTrace(ai, plan["door"]) if hook else ArcTrace(ai) as arc:
         ok = planner.run(
             sw,
             "swing",
@@ -1324,14 +1367,20 @@ def execute_open(ai, planner, plan, *, fast=False):
     if hook:
         closure = float(final["gripper_pos"])
         say(f"  hook finger closure: {hook_closure_at_grasp:.3f} at grasp, {closure:.3f} after pull")
-        if closure <= 0.2:
+        if not np.isfinite(closure) or closure <= 0.2:
             say("  hook retention check: the fingers reopened during the pull")
+            dc.DOOR_FILE.unlink(missing_ok=True)
+            return False
+        if not ok or not arc.retained():
+            say("  hook pull could not verify retention; stopping before release")
+            dc.DOOR_FILE.unlink(missing_ok=True)
             return False
         inferred = model.df.sign * hand_angle(plan["door"], final["ee_pos"])
         say(f"  hook angle from the tool and bar geometry: {inferred:.1f}°")
-        save_door_geometry(door_open_deg=max(0.0, inferred), open_sign=model.df.sign)
-        if not ok or not (90.0 <= inferred <= HOOK_ANGLE_DEG + 2):
+        if not 90.0 <= inferred <= HOOK_ANGLE_DEG + 2:
+            dc.DOOR_FILE.unlink(missing_ok=True)
             return False
+        save_door_geometry(door_open_deg=inferred, open_sign=model.df.sign)
         plan["after"].replan = abs(inferred - HOOK_ANGLE_DEG) > 1.0
         P._release(ai, early=fast)
         return True
@@ -1483,7 +1532,7 @@ def _plan_hook(planner, plan, geom):
     original = plan["cand"]
     if original.get("side") or original["flip"]:
         return None
-    cand = dict(original, bar=np.asarray(geom["h_raw"], float), hook=True)
+    cand = dict(original, bar=S.bar_point(original["h"], geom["n"]), hook=True)
     closed = closed_door(geom, cand["h"], cand["pos"], cand)
     try:
         check_open(model, planner.world, (HOOK_ANGLE_DEG + 2,), None)
@@ -1552,21 +1601,17 @@ def _select_open_plan(planner, geom, q0, staging, hook, fallback):
     if not hook:
         return fallback()
     previous_deadline = planner.deadline
-    deadline = time.monotonic() + OPEN_POLICY_S
-    if previous_deadline is not None:
-        deadline = min(deadline, previous_deadline)
+    deadline = time.monotonic() + HOOK_PREFLIGHT_S
+    planner.deadline = deadline if previous_deadline is None else min(deadline, previous_deadline)
     try:
-        # Leave time for the standard search when the hook cannot be checked.
-        planner.deadline = deadline - OPEN_PREFLIGHT_S
         plan = _hook_preflight(planner, geom, q0, staging)
-        if plan is not None:
-            say("  preflight selected the stationary hook pull")
-            return plan
-        planner.deadline = deadline
-        say("  hook preflight declined; searching the fast push open")
-        return fallback()
     finally:
         planner.deadline = previous_deadline
+    if plan is not None:
+        say("  preflight selected the stationary hook pull")
+        return plan
+    say("  hook preflight declined; searching the fast push open")
+    return fallback()
 
 
 def release_back_off(ai, planner, execute):

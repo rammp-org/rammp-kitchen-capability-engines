@@ -23,6 +23,7 @@ def setup_hook():
     check = Mock()
     scope = dict(
         np=np,
+        S=SimpleNamespace(bar_point=Mock(return_value=np.array([0.8, -0.2, 0.4]))),
         HOOK_ANGLE_DEG=94.0,
         HOOK_LAGS_DEG=(45.0, 55.0),
         time=SimpleNamespace(monotonic=lambda: 10.0),
@@ -55,7 +56,7 @@ def setup_hook():
 def test_hook_uses_the_bar_anchor_and_joins_swing_and_exterior_exit():
     plan_hook, planner, baseline, after, check = setup_hook()
     bar = np.array([0.8, -0.2, 0.4])
-    result = plan_hook(planner, baseline, {"h_raw": bar})
+    result = plan_hook(planner, baseline, {"n": np.array([-1.0, 0.0, 0.0])})
     assert result["cand"]["hook"]
     np.testing.assert_array_equal(result["door"]["closed_hold_pos"], bar)
     assert result["swing_deg"] == 94.0
@@ -69,7 +70,7 @@ def test_hook_uses_the_bar_anchor_and_joins_swing_and_exterior_exit():
 def test_hook_retains_the_baseline_if_the_exterior_exit_fails():
     plan_hook, planner, baseline, after, _ = setup_hook()
     after.plan.return_value = False, "blocked"
-    assert plan_hook(planner, baseline, {"h_raw": np.zeros(3)}) is None
+    assert plan_hook(planner, baseline, {"n": np.array([-1.0, 0.0, 0.0])}) is None
     planner.join.assert_not_called()
     assert "hook" not in baseline["cand"]
 
@@ -77,7 +78,7 @@ def test_hook_retains_the_baseline_if_the_exterior_exit_fails():
 def test_hook_refuses_if_the_door_sweep_gate_is_blocked():
     plan_hook, planner, baseline, _, check = setup_hook()
     check.side_effect = Refused("leg sweep blocked")
-    assert plan_hook(planner, baseline, {"h_raw": np.zeros(3)}) is None
+    assert plan_hook(planner, baseline, {"n": np.array([-1.0, 0.0, 0.0])}) is None
     planner.motion.assert_not_called()
     assert planner.deadline is None
 
@@ -102,6 +103,7 @@ def test_failed_hook_skips_release_and_withdrawal(swing_ok, end_closure):
         save_door_geometry=Mock(),
         say=Mock(),
         ArcTrace=lambda arm: nullcontext(),
+        HookLoadTrace=lambda arm, door: nullcontext(),
         hand_angle=lambda door, pose: -94.0,
         Refused=Refused,
         P=push,
@@ -113,7 +115,7 @@ def test_failed_hook_skips_release_and_withdrawal(swing_ok, end_closure):
     )
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(MODULE), "exec"), scope)
 
-    arm = Mock()
+    arm = Mock(spec=["get_state", "gripper"])
     opened = dict(position=np.zeros(7), ee_pos=np.zeros(7), gripper_pos=0.0)
     closed = dict(opened, gripper_pos=0.8)
     arm.get_state.side_effect = [opened, opened, opened, closed, dict(closed, gripper_pos=end_closure)]
@@ -135,7 +137,7 @@ def test_failed_hook_skips_release_and_withdrawal(swing_ok, end_closure):
     assert planner.run.call_count == 2
 
 
-def test_hook_and_fallback_share_the_live_preflight_deadline():
+def test_hook_preserves_the_callers_deadline_for_the_fallback():
     tree = ast.parse(MODULE.read_text())
     function = next(
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_select_open_plan"
@@ -151,13 +153,12 @@ def test_hook_and_fallback_share_the_live_preflight_deadline():
         return "fast"
 
     scope = dict(
-        OPEN_POLICY_S=20.0,
-        OPEN_PREFLIGHT_S=8.0,
+        HOOK_PREFLIGHT_S=12.0,
         time=SimpleNamespace(monotonic=lambda: 10.0),
         _hook_preflight=decline_hook,
         say=Mock(),
     )
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(MODULE), "exec"), scope)
     assert scope["_select_open_plan"](planner, {}, None, None, True, check_fallback) == "fast"
-    assert deadlines == [20.0, 28.0]
+    assert deadlines == [22.0, 28.0]
     assert planner.deadline == 28.0
