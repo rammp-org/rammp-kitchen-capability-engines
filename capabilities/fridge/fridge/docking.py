@@ -174,17 +174,26 @@ def stationary_look(base, arm, look, odom_to_axle, *, mode_entered):
         raise BaseError("The wheelchair must be stopped for a docking look")
     if arm.control_status().estopped:
         raise BaseError("Arm e-stop before docking look")
-    try:
-        return look()
-    finally:
+
+    def verify_stationary():
         after, v, w = _sample(base)
         delta, turn = relative_axle(before, after, odom_to_axle)
         if v > LINEAR_SETTLED or w > ANGULAR_SETTLED or np.linalg.norm(delta) > 0.01 or abs(turn) > TURN_TOL:
             raise BaseError("The wheelchair moved during a docking look")
         if arm.control_status().estopped:
             raise BaseError("Arm e-stop during docking look")
+
+    try:
+        try:
+            measured = look()
+        except Refused:
+            verify_stationary()
+            raise
+        verify_stationary()
+        return measured
+    finally:
         if mode_entered:
-            base.send_twist(0.0, 0.0)
+            base.stop()
 
 
 def confirm_wrist(base, arm, scene, look, odom_to_axle, *, mode_entered):

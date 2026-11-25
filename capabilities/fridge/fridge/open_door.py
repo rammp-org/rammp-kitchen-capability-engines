@@ -1676,9 +1676,10 @@ def run(
                 raise GraspUnconfirmed(f"{first} The retry wrist look failed: {e}") from e
             geom = dict(geom, grasp_retry=True)
             after = make_after()
-            plan = plan_open(
-                planner, geom, q0, swing, after, staging=staging, adaptive_pull=adaptive_pull, progress=progress
-            )
+            try:
+                plan = plan_open(planner, geom, q0, swing, after, staging=staging, adaptive_pull=adaptive_pull)
+            except Refused as error:
+                raise Refused(f"{first} Could not plan a new grasp after retreating: {error}") from error
             plan.update(after=after, hinge_fields=geom["hinge_fields"], door_mid=geom["door_mid"])
             LAST_PLAN = dict(plan, geom=geom, q0=q0)
             swung = execute_open(ai, planner, plan, fast=fast)
