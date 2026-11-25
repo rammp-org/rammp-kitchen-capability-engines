@@ -219,7 +219,7 @@ class WristCamera:
                     return [], None
                 done.wait(min(0.1, left))
         finally:
-            if not fut.done():
+            if not done.is_set():
                 fut.cancel()
         resp = fut.result()
         if not resp.success:
