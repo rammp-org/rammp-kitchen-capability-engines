@@ -70,7 +70,7 @@ def route_options(delta, yaw):
 
 def checked_route(delta, yaw, remaining_d, remaining_yaw, geom, guard):
     blocked = None
-    for route in route_options(delta, yaw):
+    for route in shallow_route_options(delta, yaw):
         travel = sum(abs(d) + TRANSLATION_TOL for d, _ in route if abs(d) > TRANSLATION_TOL)
         turning = sum(abs(a) + TURN_TOL for _, a in route if abs(a) > TURN_TOL)
         if travel > remaining_d or turning > remaining_yaw:
@@ -340,7 +340,7 @@ def guidance_text(distance, turn):
     return f"{movement}, then stop. Keep the route clear. Wait here while I check again."
 
 
-def guided_routes(delta, yaw):
+def shallow_route_options(delta, yaw):
     yield from route_options(delta, yaw)
     # A shallow diagonal followed by a straight correction can make a
     # lateral move without turning the handle out of the cameras.
@@ -370,7 +370,7 @@ def guided_step(delta, yaw, geom, guard):
         return max(0.0, max(abs(wrap(angle)) for angle in headings) - GUIDED_LOOK_HEADING)
 
     blocked = None
-    for route in sorted(guided_routes(delta, yaw), key=view_excursion):
+    for route in sorted(shallow_route_options(delta, yaw), key=view_excursion):
         for distance, turn in route:
             if abs(distance) > TRANSLATION_TOL or abs(turn) > TURN_TOL:
                 break
