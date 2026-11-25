@@ -514,6 +514,7 @@ class PushOpen:
                     route,
                     FridgeModel(moved),
                     end_deg=end_deg,
+                    short_reentry=self.short_reentry and move == 0,
                 )
                 # Preserve the individually checked contact-window path and its clearance endpoint.
                 retreat_goals = [replace(goal, blend=0.0) for goal in off.goals]
