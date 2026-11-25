@@ -101,6 +101,7 @@ from box_opening.constants import (
     COMPLIANT_RUN_GAINS,
     CONTACT_SPEED,
     DRIFT_REPLAN_RAD,
+    FINGERS_PAST_MODEL_M,
     FREE_LINE_SPEED,
     HOME_SPEED,
     IMPEDANCE_KQ,
@@ -1408,13 +1409,16 @@ class WayIn:
     the arm stands (solve_way_in): the MOVE to its look pose ([] when there),
     reach_from_here's ReachPlan, how the hand turns down (WayDown), the
     slide before the turn (None when the way down is walked) and the press
-    stroke (StrokePlan)."""
+    stroke (StrokePlan). Flown with the sight (fly_press_way_in), `stroke`
+    is the stroke that flew and `sighted` the button's xy the sight put it
+    at where it was followed; else None."""
 
     move: list
     plan: ReachPlan
     down: object
     slide: list
     stroke: object
+    sighted: tuple = None
 
 
 def solve_way_in(ctx, cfg, button, tilt, q_from):
@@ -1656,6 +1660,471 @@ def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
     # it never polled at all, "none seen". As one execution the same planning runs at the re-aim's start,
     # seconds before the descent; here the execution is the descent
     return res + runner.run(press, execute=True), contact, [lg.name for lg in press], True
+
+
+# THE SIGHT before the press (fly_press_way_in). The button is aimed once, from the look pose some 0.30 m off
+# and 25-45 deg oblique, and the hand flies to the press in one motion: the wrist mount at that range, the
+# arm's own error between two poses 15 cm and 45 deg apart, the wrist depth reading a top 20-35 mm low on an
+# oblique ray, AIM_FORWARD_M's 10 mm (fitted to another robot's mount) and the hand's lean (the real pads
+# FINGERS_PAST_MODEL_M past the point the heights go by: that times sin(lean) further out) stack to 2-3 cm
+# on a 44 mm button, and nothing checked the result before the pads came down. With the sight the way in
+# first stops with the hand turned down as the press turns it and the wrist lens over the aimed button,
+# measures the button's centre in colour frames there (perception/button_sight: no depth, which reads nothing
+# that close) and moves the real pad ends over it, level, before the stroke: what is left is the mount's
+# lens-to-pads vector. Not flown. False: the way in of 5eeecf0, as it was sent.
+SIGHT_BEFORE_PRESS = True
+# The point the heights go by this far over the top the press goes by, at the sight: the recorded tops have
+# read up to 45 mm low and the real pads end FINGERS_PAST_MODEL_M (20 mm) past it, which leaves them 15 mm
+# clear of the real lid in the worst recorded case, over its rim or outside it. The level line from there
+# and the stroke's start stand as high: nothing moves sideways lower than the sight
+SIGHT_ABOVE_M = 0.080
+# The sight: colour frames stamped after the arm stood still, until SIGHT_HITS of them place the button
+# within SIGHT_AGREE_M of each other, or SIGHT_S has passed (some 9 frames at the wrist OAK's 15 fps)
+SIGHT_HITS = 2
+SIGHT_AGREE_M = 0.002
+SIGHT_S = 0.6
+# A button sighted farther than this from the aim is not followed (the press goes by the aim): the aim's own
+# errors stack to 2-3 cm, and further than that the circle is more likely another than the button
+SIGHT_MAX_OFF_M = 0.030
+# The sight pose is solved for a stand-in target, moved by its lens's miss and solved again up to SIGHT_SOLVES
+# times, until the solved end's lens stands within SIGHT_LENS_TOL_M of over the aimed button by the arm's own
+# FK: the picture measures the rest
+SIGHT_LENS_TOL_M = 0.003
+SIGHT_SOLVES = 4
+SIGHT_VIEW_POINTS = 24  # the in-view check projects this many points round the circle it asks for
+# The real pad ends in tool_frame: FINGERS_PAST_MODEL_M past the point the heights go by
+# (depth_press.DOWN_CONTACT_TOOL). A followed sight puts THEM over the button's centre: a hand leaning by
+# `a` has them FINGERS_PAST_MODEL_M sin(a) further out than that point
+SIGHT_PADS_TOOL = (0.0, 0.0, TCP_OFFSET_M + FINGERS_PAST_MODEL_M)
+# Where the level line over the button sighted does not fly whole (a joint limit down it, near the edge of the
+# arm's reach), the pads go these parts of the way from the aim to it, the first whose line and stroke fly
+SIGHT_PARTS = (1.0, 0.75, 0.5, 0.25)
+
+
+@dataclass
+class SightWay:
+    """The way in with the sight (plan_sight): `legs`, the free air to the sight pose as one execution, the
+    hand there at joints `q` and attitude `quat`, its wrist lens over the aimed button; `tail`, the level line
+    from there to the stroke's start with the heights point (depth_press.DOWN_CONTACT_TOOL) over the aimed
+    xy `aim`, and `stroke`, the press stroke from its end: what flies where the sight is not followed (where
+    today's press comes down); `lens`, the lens in the hand it was planned by (depth_press.lens_in_hand's
+    pair); `short_deg`, how far short of straight down the hand stands there; `way_in`, the free air as a
+    WayIn (its move, plan, walk or turn and slide), for what the run reads of the way in after it flew
+    (_as_flown)."""
+
+    legs: list
+    q: list
+    quat: list
+    tail: list
+    stroke: object
+    aim: tuple
+    lens: tuple
+    short_deg: float = 0.0
+    way_in: object = None
+
+
+@dataclass
+class Sighted:
+    """What a sight measured (_sight): the button's centre in base xy (`xy`, the agreeing frames' median),
+    the last agreeing frame's button_sight.ButtonSight, how many frames agreed of how many were judged, the
+    lens in the hand it was placed by (m) and how far below the lens the arm expected the top (m)."""
+
+    xy: tuple
+    sight: object
+    hits: int
+    frames: int
+    lens_in_hand: list
+    expect_below: float
+
+
+def _sight_in_view(R_base_cam, lens_xyz, k, dist, shape, aim, top_z, model):
+    """Why the wrist camera at `lens_xyz` with axes `R_base_cam` would not have the aimed button whole in its
+    picture, or None: its seam's circle at the top `top_z`, grown by SIGHT_MAX_OFF_M, projected through `k`
+    and `dist` (frames `shape` (h, w)), must lie button_sight.EDGE_PX inside the frame's edge."""
+    import cv2
+
+    from box_opening.perception.button_sight import EDGE_PX
+
+    r = float(model.button_diameter_m) / 2.0 + SIGHT_MAX_OFF_M
+    a = np.linspace(0.0, 2.0 * math.pi, SIGHT_VIEW_POINTS, endpoint=False)
+    pts = np.c_[aim[0] + r * np.cos(a), aim[1] + r * np.sin(a), np.full(a.shape, float(top_z))]
+    pc = (pts - np.asarray(lens_xyz, float)) @ np.asarray(R_base_cam, float)
+    if (pc[:, 2] <= 0.0).any():
+        return "the button is behind the wrist camera from there"
+    d = np.zeros(5) if dist is None else np.asarray(dist, float).ravel()
+    uv = cv2.projectPoints(pc.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), np.asarray(k, float), d)[0].reshape(-1, 2)
+    h, w = shape
+    lo, hi = uv.min(axis=0), uv.max(axis=0)
+    if lo[0] < EDGE_PX or lo[1] < EDGE_PX or hi[0] > w - 1 - EDGE_PX or hi[1] > h - 1 - EDGE_PX:
+        return "the button %.0f mm round would show at u %.0f-%.0f, v %.0f-%.0f of a %dx%d frame" % (
+            2000 * r,
+            lo[0],
+            hi[0],
+            lo[1],
+            hi[1],
+            w,
+            h,
+        )
+    return None
+
+
+def plan_sight(ctx, cfg, way, top_z, grab, q_from):
+    """The sight's way in for `way` (solve_way_in's, the aimed button's top at `top_z`) from joints `q_from`
+    where it starts, before the arm moves: (SightWay, None) or (None, why).
+
+    Its end is the hand turned down as the press turns it (walk_or_turn, from the look pose
+    reach_from_here's lines go to) with the wrist lens (depth_press.lens_in_hand, on `grab`'s newest frame)
+    vertically over the aimed button and the heights point SIGHT_ABOVE_M over `top_z`: reach_from_here is
+    handed a stand-in button where the heights point is to stand, moved by the lens's miss by the arm's FK at
+    the solved end until within SIGHT_LENS_TOL_M. No turn lower down (TURN_LOW_ABOVE_M) is tried: the sight
+    is at its height or not at all. From there the level line holding that attitude to the heights point over
+    the aimed xy, and the press stroke from its end. Each a line the runner flies (depth_press.line_refusal),
+    the lines walk_or_turn re-plans round the chair held to the same guard, the aimed button whole in the
+    picture there (_sight_in_view), the free air one execution."""
+    from box_opening.runtime import approach
+    from box_opening.tasks import depth_press as dp
+
+    k, color = getattr(grab, "k", None), getattr(grab, "color", None)
+    if k is None or color is None:
+        return None, "no wrist frame yet"
+    pair = dp.lens_in_hand(ctx, grab)
+    if pair is None:
+        return None, "no camera pose for the wrist lens (TF)"
+    lens = np.asarray(pair[0], float)
+    r_hc = np.eye(3) if pair[1] is None else np.asarray(pair[1], float)
+    chain = approach._chain()
+    aim = np.asarray(way.plan.button[:2], float)
+    top = float(top_z)
+    target = aim.copy()  # where the heights point is asked to stand
+    for _ in range(SIGHT_SOLVES):
+        stand_in = (float(target[0]), float(target[1]), top + SIGHT_ABOVE_M - REACH_START_M)
+        move, plan, why = reach_from_here(ctx, cfg, stand_in, way.plan.tilt_deg, need_stroke=False, q=q_from)
+        if plan is None:
+            return None, why
+        down, why = walk_or_turn(ctx, move[-1] if move else q_from, plan.slide_pts, plan.start_xyz, plan.quat)
+        if down is None:
+            return None, "the way down to it (%s)" % why
+        q = [float(v) for v in (down.pts[-1] if down.pts else plan.slide_pts[-1])]
+        R, t = (np.asarray(v, float) for v in chain.fk(q))
+        miss = aim - (t + R @ lens)[:2]
+        if math.hypot(*miss) <= SIGHT_LENS_TOL_M:
+            break
+        target = target + miss
+    else:
+        return None, "its lens ends %.0f mm from over the button after %d solves" % (
+            1000 * math.hypot(*miss),
+            SIGHT_SOLVES,
+        )
+    why = _sight_in_view(R @ r_hc, t + R @ lens, k, getattr(grab, "dist", None), color.shape[:2], aim, top, ctx.model)
+    if why is not None:
+        return None, "the button is not in view from over it, the hand %.0f deg short of straight down: %s" % (
+            down.short_deg,
+            why,
+        )
+    tail, stroke, why = _level_and_stroke(
+        ctx,
+        cfg,
+        q,
+        down.quat,
+        dp.DOWN_CONTACT_TOOL,
+        aim,
+        top,
+        lambda goal, around: chain.straight_line(q, goal, down.quat, **around),
+    )
+    if tail is None:
+        return None, "from it over the aimed button, %s" % why
+    slide = None if down.walked else plan.slide_pts
+    for name, pts in [("the move to its look pose", move), ("the slide in", slide or [])]:
+        why = dp.line_refusal(chain, pts)
+        if why is not None:
+            return None, "%s: %s" % (name, why)
+    # the free air as way_in_legs builds it, no stroke: one execution in the joint impedance
+    air = WayIn(move, plan, down, slide, dataclasses.replace(stroke, legs=[]))
+    legs = way_in_legs(ctx, cfg, air, air=False)
+    if len(way_in_parts(legs) or []) != 1:
+        return None, "its free air does not fly as one execution"
+    aim = (float(aim[0]), float(aim[1]))
+    return SightWay(legs, q, list(down.quat), tail, stroke, aim, pair, down.short_deg, air), None
+
+
+def _sight_way(ctx, cfg, runner, way, legs, top_z, eyes):
+    """(SightWay, None, ms) for the press's way in `way` (flown today as `legs`), or (None, why there is
+    none, ms): with the free air in position (air_position) the stroke already flies on its own after it, and
+    there is no sight; nor without the run's wrist camera (`eyes`: the node and the watcher whose grab holds
+    its newest frame). The arm stands still first: the lens in the hand is read at rest (plan_sight). A plan
+    that raises is no sight: the way in as before. `ms`: how long plan_sight took (its solves are paid on
+    every press, a sight or not), None where it was not asked."""
+    if air_position():
+        return None, "the free air flies in position control (%s=position)" % AIR_CONTROL_ENV, None
+    grab = getattr(eyes[1], "grab", None) if eyes is not None and len(eyes) > 1 else None
+    if eyes is None or eyes[0] is None or grab is None:
+        return None, "no wrist camera on this run", None
+    if not legs:
+        return None, "no way in to fly", None
+    runner.wait_still("the sight's plan")
+    t0 = time.monotonic()
+    try:
+        sight, why = plan_sight(ctx, cfg, way, top_z, grab, [float(v) for v in legs[0].traj.points[0].positions])
+    except Exception as e:  # noqa: BLE001 - a sight that cannot be planned is no reason not to press
+        sight, why = None, "its plan raised %s: %s" % (type(e).__name__, e)
+    return sight, why, round(1000.0 * (time.monotonic() - t0), 1)
+
+
+def _sight(ctx, eyes, sight, top_z, q):
+    """Colour frames from the wrist camera stamped after the arm stood still at joints `q` (`eyes`: the node
+    to spin and the watcher whose grab holds the newest frame), each judged once (button_sight.sight_button,
+    the button expected at the aim and `top_z` from the lens), until SIGHT_HITS place the button within
+    SIGHT_AGREE_M of each other or SIGHT_S has passed: (Sighted, None) or (None, why). The lens and the
+    hand are placed by the same joints at the same rest (depth_press.lens_in_hand's mount, the arm's FK at
+    `q`). The agreeing frame is saved as the aim's frames are."""
+    from box_opening.perception.button_sight import sight_button
+    from box_opening.perception.d405 import frame_snapshot
+    from box_opening.runtime import approach
+    from box_opening.tasks import depth_press as dp
+    from box_opening.tasks.press_demo import _spin_detect, save_aim_frame
+
+    node, grab = eyes[0], eyes[1].grab
+    R, t = (np.asarray(v, float) for v in approach._chain().fk(q))
+    aim = np.asarray(sight.aim, float)
+    after = node.get_clock().now().nanoseconds
+    seen, last, frames, pair, why = [], None, 0, None, "no wrist frame"
+    end = time.monotonic() + SIGHT_S
+    while time.monotonic() < end:
+        _spin_detect(node)
+        f = frame_snapshot(grab)
+        if f.color is None or f.k is None or f.color_stamp is None:
+            continue
+        st = dp._stamp_ns(f.color_stamp)
+        if st <= after or (last is not None and st <= last):
+            continue  # shot while the arm was still moving, or not newer than the last judged
+        last, frames = st, frames + 1
+        if pair is None:
+            pair = dp.lens_in_hand(ctx, grab, still_since_ns=after)
+            if pair is None:
+                why = "no camera pose for the wrist lens (TF)"
+                continue
+        lens = t + R @ np.asarray(pair[0], float)
+        r_hc = np.eye(3) if pair[1] is None else np.asarray(pair[1], float)
+        s, why = sight_button(f.color, f.k, f.dist, R @ r_hc, ctx.model, aim - lens[:2], lens[2] - float(top_z))
+        if s is None:
+            continue
+        xy = lens[:2] + np.asarray(s.off_xy, float)
+        seen.append(xy)
+        near = [o for o in seen if math.hypot(*(o - xy)) <= SIGHT_AGREE_M]
+        if len(near) >= SIGHT_HITS:
+            save_aim_frame(grab, s, "sight", frame=(f, None, {}))
+            mid = np.median(near, axis=0)
+            below = float(lens[2]) - float(top_z)
+            lens_in_hand = [float(v) for v in pair[0]]
+            return Sighted((float(mid[0]), float(mid[1])), s, len(near), frames, lens_in_hand, below), None
+    return None, "%d frame(s) after the arm stood still, %s (last: %s)" % (
+        frames,
+        "none agreeing" if seen else "the button in none",
+        why,
+    )
+
+
+def _level_and_stroke(ctx, cfg, q, quat, point_tool, xy, top_z, solve):
+    """From the hand at joints `q` holding attitude `quat`: (the level line that puts the hand's `point_tool`
+    (tool_frame) over `xy` at its height, the press stroke from its end, None), or (None, None, why).
+    `solve(goal, around)`: the line's joint points to the tool frame's `goal` (the planned joints' straight
+    line, plan_sight; the live joints', _over), re-planned round the chair as the way in's are (`around`).
+    Each a line the runner flies (depth_press.line_refusal)."""
+    from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import around_body
+    from box_opening.tasks import depth_press as dp
+
+    chain = approach._chain()
+    R, t = (np.asarray(v, float) for v in chain.fk(q))
+    p = t + R @ np.asarray(point_tool, float)
+    goal = [float(t[0] + xy[0] - p[0]), float(t[1] + xy[1] - p[1]), float(t[2])]
+    pts, why = solve(goal, around_body(chain, way_in_guard(ctx, chain, top_z)))
+    if pts is None:
+        return None, None, "the level line over it is not one the arm flies (%s)" % why
+    stroke, why = dp.compliant_stroke(chain, cfg, pts[-1] if pts else q, quat, top_z)
+    if stroke is None:
+        return None, None, "the stroke from over it (%s)" % why
+    for name, line in [("the level line over it", pts)] + [(name, line) for name, line, _speed in stroke.legs]:
+        why = dp.line_refusal(chain, line)
+        if why is not None:
+            return None, None, "%s: %s" % (name, why)
+    return pts, stroke, None
+
+
+def _over(ctx, cfg, q, point_tool, xy, sight, top_z, planned=False):
+    """_level_and_stroke from the sight, the arm still at joints `q`, the line solved from the live joints
+    (_line); `planned`: the sight's own planned tail where the arm stands at its start (_line_from)."""
+
+    def solve(goal, around):
+        if planned:
+            return _line_from(ctx, sight.tail, goal, sight.quat, **around)
+        return _line(ctx, goal, sight.quat, **around)
+
+    return _level_and_stroke(ctx, cfg, q, sight.quat, point_tool, xy, top_z, solve)
+
+
+def _toward(ctx, cfg, q, sight, xy, top_z):
+    """The real pad ends (SIGHT_PADS_TOOL) over `xy`, the button sighted, or where that line or its stroke
+    does not fly, over the first point SIGHT_PARTS of the way from the aim to it whose do: (line, stroke,
+    the part, why the whole way does not fly or None), or (None, None, None, why the whole way does not)."""
+    aim = np.asarray(sight.aim, float)
+    off = np.asarray(xy, float) - aim
+    whole = None
+    for part in SIGHT_PARTS:
+        tail, stroke, why = _over(ctx, cfg, q, SIGHT_PADS_TOOL, aim + part * off, sight, top_z)
+        if tail is not None:
+            return tail, stroke, part, whole
+        whole = whole or why
+    return None, None, None, whole
+
+
+def _as_flown(way, sight, tail):
+    """`way` (a WayIn) as the sight flew it, so that every way back reverses lines that flew, from where the
+    stroke starts back to the look pose the aim was taken from (reach_lid_off._down_backwards, _look_joints):
+    its plan the sight way's; its walk or turn the sight way's with the level line flown after it as its last
+    stretch (the arm stood a few mrad off the walk or turn's end when that line was solved from where it
+    stood: that step is in it); and the sight way's move to its own look pose, which no way back reverses on
+    its own, put in front of what is reversed last (the slide, or the walk where the way down is walked), so
+    that `move` is empty and the way back ends where the move began: the aim's look pose, where the knob is
+    then judged from as the aim was."""
+    w = sight.way_in
+
+    def joints(path):
+        return [[float(v) for v in q] for q in (path or [])]
+
+    def joined(a, b):
+        if a and b and np.allclose(a[-1], b[0], atol=1e-9):
+            return a + b[1:]
+        return a + b
+
+    move = joints(w.move)
+    down = joints(w.down.pts) or [[float(v) for v in sight.q]]
+    down += joints(tail)
+    slide = joints(w.slide) if w.slide is not None else None
+    if w.down.walked:
+        down = joined(move, down)
+    elif move:
+        slide = joined(move, slide or [down[0]])
+    way.move, way.plan, way.slide = [], w.plan, slide
+    way.down = dataclasses.replace(w.down, pts=down)
+
+
+def _fly_sight(ctx, cfg, runner, way, sight, top_z, eyes, plan_ms=None):
+    """fly_press_way_in with the sight (`sight`, plan_sight's): the free air to the sight pose as one
+    execution; where it arrived, the arm at rest, the sight (_sight); then the level line and the stroke as
+    ONE execution, the press's contact watch on it (depth_press.watch_press), in the joint impedance
+    throughout. A sight within SIGHT_MAX_OFF_M of the aim is followed: the real pad ends (SIGHT_PADS_TOOL)
+    over the centre it measured, or part of the way there where the whole does not fly (_toward), and
+    `way.sighted` set. Any other (an arm that did not come to rest, no button, frames that never agree, too
+    far, none of its lines flown, an Exception on the way to the stroke's execution): the heights point over
+    the aimed xy, where today's press comes down. `way.stroke` is the stroke that flies, and `way`'s way down
+    what flew (_as_flown), whichever: written before the stroke's execution is known to have started (a
+    caller after a stroke that did not start reads nothing of it). `plan_ms`: plan_sight's time, noted;
+    `look_ms` beside it: from the arm at rest to the sight's answer, found or not (None where it was not
+    looked for)."""
+    from box_opening.tasks import depth_press as dp
+
+    log.info(
+        "[press_demo] SIGHT: the hand turns down %.0f deg short of straight down with the wrist lens over the "
+        "aimed button, %.0f mm over its top, and looks before the stroke" % (sight.short_deg, 1000 * SIGHT_ABOVE_M)
+    )
+    res = runner.run(sight.legs, execute=True)
+    if any(not r.ok for r in res):
+        return res, None, [lg.name for lg in sight.legs], False
+    still = runner.wait_still("the sight")
+    at_rest = time.monotonic()
+    q = [float(v) for v in ctx.client.joints()]
+
+    def legs_for(tail, stroke):
+        world = _full_world(ctx)
+        press = [dp.compliant_line(ctx, "sight:tail", tail, sight.quat, free_line_speed(ctx), world)] if tail else []
+        return press + [dp.compliant_line(ctx, n, pts, stroke.quat, speed, world) for n, pts, speed in stroke.legs]
+
+    seen = off = part = whole = look_ms = None
+    try:
+        if still is not None and still[1]:
+            why = "the arm did not come to rest at the sight in %.1f s" % still[0]
+        else:
+            try:
+                seen, why = _sight(ctx, eyes, sight, top_z, q)
+            finally:
+                look_ms = round(1000 * (time.monotonic() - at_rest), 1)
+        tail = stroke = None
+        if seen is not None:
+            off = np.asarray(seen.xy, float) - np.asarray(sight.aim, float)
+            if math.hypot(*off) > SIGHT_MAX_OFF_M:
+                why = "the button sighted %.0f mm from the aim, past %.0f mm" % (
+                    1000 * math.hypot(*off),
+                    1000 * SIGHT_MAX_OFF_M,
+                )
+            else:
+                tail, stroke, part, whole = _toward(ctx, cfg, q, sight, seen.xy, top_z)
+                why = whole
+        if tail is None:
+            tail, stroke, why_aim = _over(ctx, cfg, q, dp.DOWN_CONTACT_TOOL, sight.aim, sight, top_z, planned=True)
+            if tail is None:
+                # the plan's own: the runner flies it from where the arm stands within DRIFT_REPLAN_RAD of its
+                # start and refuses it past that, and the callers bring the arm home from over the box, as
+                # where a stroke does not start
+                tail, stroke = sight.tail, sight.stroke
+                why = "%s; from here %s" % (why, why_aim)
+        press = legs_for(tail, stroke)
+    except Exception as e:  # noqa: BLE001 - a sight that fails never stops a run: the press goes by the aim
+        part, tail, stroke = None, sight.tail, sight.stroke
+        why = "the sight raised %s: %s" % (type(e).__name__, e)
+        press = legs_for(tail, stroke)
+    followed = part is not None
+    fields = dict(planned=True, followed=followed, why=None if followed else why, plan_ms=plan_ms, look_ms=look_ms)
+    if followed:
+        fields.update(part=part, whole_why=whole)
+    if seen is not None:
+        s = seen.sight
+        fields.update(
+            dx_mm=round(1000 * off[0], 1),
+            dy_mm=round(1000 * off[1], 1),
+            how=s.how,
+            hits=seen.hits,
+            frames=seen.frames,
+            below_mm=round(1000 * s.below_m, 1),
+            expect_below_mm=round(1000 * seen.expect_below, 1),
+            r_px=round(s.r_px, 1),
+            lens_in_hand_mm=[round(1000 * v, 1) for v in seen.lens_in_hand],
+        )
+    runner.note("sight", **fields)
+    if followed:
+        over = (
+            "the pads come down over it"
+            if part == 1.0
+            else "the pads come down %.0f%% of the way to it (the whole way: %s)" % (100 * part, whole)
+        )
+        log.info(
+            "[press_demo] SIGHT: the button %+.0f mm in x, %+.0f mm in y from the aim (by its %s, %d of %d frames)"
+            " — %s" % (1000 * off[0], 1000 * off[1], seen.sight.how, seen.hits, seen.frames, over)
+        )
+        way.sighted = tuple(seen.xy)
+    else:
+        log.info("[press_demo] SIGHT: not followed (%s) — pressing by the aim" % why)
+    way.stroke = stroke
+    _as_flown(way, sight, tail)
+    contact = dp.watch_press(ctx, press, stroke, top_z)
+    return res + runner.run(press, execute=True), contact, [lg.name for lg in press], True
+
+
+def fly_press_way_in(ctx, cfg, runner, way, legs, top_z, eyes=None, lookahead=None):
+    """The press's way in (`way`, solve_way_in's, flown today as `legs`, way_in_legs') onto the button whose
+    top is at `top_z`: fly_way_in's four, whichever way it flies. The one place that decides between the
+    sight and today's way in (SIGHT_BEFORE_PRESS): the sight planned (plan_sight, `eyes` the node and the
+    wrist camera's watcher), its free air, the sight and the stroke flown (_fly_sight) with the air split's
+    return (over the box once its free air arrived; `lookahead` hosted by nothing); else fly_way_in, `legs`
+    exactly as today, the reason the run says."""
+    if not SIGHT_BEFORE_PRESS:
+        return fly_way_in(ctx, runner, legs, way.stroke, top_z, lookahead=lookahead)
+    sight, why, plan_ms = _sight_way(ctx, cfg, runner, way, legs, top_z, eyes)
+    if sight is None:
+        log.info("[press_demo] SIGHT: not planned (%s) — the way in as before" % why)
+        runner.note("sight", planned=False, why=why, plan_ms=plan_ms)
+        return fly_way_in(ctx, runner, legs, way.stroke, top_z, lookahead=lookahead)
+    return _fly_sight(ctx, cfg, runner, way, sight, top_z, eyes, plan_ms=plan_ms)
 
 
 def _wrist_gravity():
@@ -2624,13 +3093,14 @@ def _note_flight(runner, kind, names, last):
     return retimed
 
 
-def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
+def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator, eyes=None):
     """A compliant depth press's way in (`way`, flown as `legs`,
     way_in_legs') from the aimed look pose to the stroke's end below the
     button's bottom: ONE runner.run, re-timed into one execution, nothing
     read between its legs — the way home planned while it flies, from the
     stroke's start (plan_way_out, the runner's lookahead); with its free
-    air in position (fly_way_in: two executions) the stroke's own execution
+    air in position, or with the sight before the stroke (fly_press_way_in,
+    `eyes` the run's cameras: two executions) the stroke's own execution
     hosts no planning, and the way home is planned after the hold. Then the hold on
     the button whose top is at `top_z` (depth_press.compliant_hold) and the
     way home from it (_way_home): the rise back up the stroke, the clear
@@ -2667,20 +3137,22 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
         # The end the lookahead is handed, the stroke's bottom inside the
         # padded box, is no start for it, and is left unused. Where the pads
         # meet the box ends the stroke past it (the contact watch)
-        res, contact, names, over_box = fly_way_in(
+        res, contact, names, over_box = fly_press_way_in(
             ctx,
+            cfg,
             runner,
+            way,
             legs,
-            way.stroke,
             top_z,
+            eyes,
             lookahead=lambda _end: plan_way_out(ctx, cfg, way.stroke.q0, way.stroke.quat),
         )
         ahead = runner.lookahead_result  # every run() resets it
         if over_box:
-            # its free air in position: the stroke flew as an execution of its own, which hosts no planning
-            # (fly_way_in), so no plan failed. The way home is planned after the hold (_way_home: the rise,
-            # then home from over the box)
-            ahead = (None, "the stroke flew on its own, after the free air in position, and hosts no planning")
+            # its free air in position, or the sight's: the stroke flew as an execution of its own, which hosts
+            # no planning (fly_way_in, fly_press_way_in), so no plan failed. The way home is planned after the
+            # hold (_way_home: the rise, then home from over the box)
+            ahead = (None, "the stroke flew on its own, after the free air, and hosts no planning")
         last = res[-1]
         flown = all(r.ok for r in res)
         # The runner's report of the group it re-timed (last_retime) is this
@@ -3952,7 +4424,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
                 from box_opening.tasks import reach_lid_off
 
                 return reach_lid_off.run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before)
-            return _fly_way_in(ctx, cfg, runner, way, legs, button[2], scene_fix, locator)
+            return _fly_way_in(ctx, cfg, runner, way, legs, button[2], scene_fix, locator, eyes=eyes)
         log.info(
             "[press_demo] the way in does not fly as one execution (%s) — leg by leg, each solved again from where "
             "the arm stands" % why_not

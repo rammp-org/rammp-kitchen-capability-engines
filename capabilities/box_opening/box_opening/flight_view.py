@@ -129,6 +129,15 @@ PUSH_NONE = re.compile(r"^PUSH: none from where the pads met the button: (.*)$")
 PUSH_STOPPED = re.compile(
     r"^PUSH: step 1 stopped part-way from where the pads met the button, the pads (-?[\d.]+) mm lower .*?: (.*)$"
 )
+# the sight before the stroke (tasks/reach_press.fly_press_way_in): followed, how far the button was from the
+# aim and how far the pads were brought (all the way, or part of it and why not all); not followed, why (the
+# press by the aim); not planned, why (the way in as before)
+SIGHT = re.compile(
+    r"^SIGHT: the button ([-+]?\d+) mm in x, ([-+]?\d+) mm in y from the aim \(by its (\S+), (\d+) of (\d+) frames\)"
+    r"(?: — the pads come down (\d+)% of the way to it \(the whole way: (.*)\))?"
+)
+SIGHT_NOT = re.compile(r"^SIGHT: not followed \((.*)\) — pressing by the aim$")
+SIGHT_NONE = re.compile(r"^SIGHT: not planned \((.*)\) — the way in as before$")
 PRESS_REFUSED = re.compile(r"^PRESS REFUSED \((.*?)\)")
 GRIP_FROM_PRESS = re.compile(r"^GRIP STRAIGHT FROM THE PRESS: up (\d+) mm")
 GRIP_FROM_LOOK = re.compile(r"^GRIP[^:]*: the fingers open to the knob")
@@ -611,6 +620,27 @@ class FlightView:
         m = CONTACT.match(s)
         if m:
             self.contact_mm = int(m.group(1))
+            return
+        m = SIGHT.match(s)
+        if m:
+            dx, dy = int(m.group(1)), int(m.group(2))
+            brought = (
+                "the pads brought over it"
+                if m.group(6) is None
+                else "the pads brought %s%% of the way to it (the whole way: %s)" % (m.group(6), m.group(7))
+            )
+            self._note(
+                "looked before the stroke: the button %.0f mm from the aim (x %+d, y %+d, by its %s), %s"
+                % (math.hypot(dx, dy), dx, dy, m.group(3), brought)
+            )
+            return
+        m = SIGHT_NOT.match(s)
+        if m:
+            self._note("looked before the stroke, pressed by the aim: %s" % m.group(1))
+            return
+        m = SIGHT_NONE.match(s)
+        if m:
+            self._note("no look before the stroke: %s" % m.group(1))
             return
         m = PUSH.match(s)
         if m:

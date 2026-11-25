@@ -3371,9 +3371,11 @@ def _note_frames(ctx, **facts):
         frames.note(**facts)
 
 
-def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
+def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None, eyes=None):
     """Press number `press`: the way in `legs` (way_in_legs of `way`) as
-    one execution, the hold on the button whose top is at `top_z`, and the
+    one execution — or, the sight before the stroke planned (`eyes` the
+    run's cameras: rp.fly_press_way_in), the free air to the sight, the
+    sight and the stroke as two —, the hold on the button whose top is at `top_z`, and the
     way back to the look pose (_way_back) as one more. Returns (None,
     where the hold held the pads when it felt the button, else None) at the
     look pose, or (the exit code, None) where the run stopped: home from the
@@ -3404,8 +3406,9 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
     viz_hook("press", way.stroke, top_z, cfg)  # the stroke, drawn off this thread (perception/viz)
     # where the pads meet the box ends every press's stroke past it (review round 2: the second
     # too), and a contact well off the cameras' top refuses it (dp.watch_press)
-    # (its free air in position control, rp.air_position: two executions, and `names` the last's)
-    res, contact, names, over_box = rp.fly_way_in(ctx, runner, legs, way.stroke, top_z)
+    # (its free air in position control, rp.air_position, or the sight before the stroke: two executions, and
+    # `names` the last's; way.stroke the stroke that flew)
+    res, contact, names, over_box = rp.fly_press_way_in(ctx, cfg, runner, way, legs, top_z, eyes)
     last = res[-1]
     flown = all(r.ok for r in res)
     retimed = rp._note_flight(runner, "reach_way_in_flight", names, last) if last.flown_traj is not None else {}
@@ -3832,8 +3835,9 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
     the press and the way back (_press_and_back), the look (knob_look), the
     press once more only where the knob reads flush (KnobLook.shut) and the
     lid did not rise (risen with its knob flush: knob_look's STOP), then the lid off
-    (take_lid_off) at the aimed `button` (its top the press's), the grip
-    going by the lid where the last hold held the pads (grip_lid_z). With
+    (take_lid_off) at the aimed `button` (its top the press's) — its xy
+    where a press's sight saw it, where one was followed (WayIn.sighted) —,
+    the grip going by the lid where the last hold held the pads (grip_lid_z). With
     GRIP_FROM_PRESS the first press's hold goes straight on to the grip
     (_grip_from_hold), the lid video recording from the press on; where
     that grip misses, back at the look pose, the look and all after it as
@@ -3846,6 +3850,7 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
     node, watcher = eyes[0], eyes[1]
     tilt = way.plan.tilt_deg
     top_z = float(button[2])
+    at = button  # the button the press once more and the grip go by: the aim's, or where a sight saw it
     ctx.contact_pad = CONTACT_SHIFT_PAD_M  # the stroke meets the box by design: every world pads it from here
     held_z = None
     video = None
@@ -3869,9 +3874,14 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
                 def direct(seen, way=way):
                     return _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room)
 
-            code, z = _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=direct)
+            code, z = _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=direct, eyes=eyes)
             if code is not None:
                 return end(code)
+            if way.sighted is not None:
+                # the sight before the stroke was followed (rp.fly_press_way_in): the press once more and the
+                # grip go by the button where it saw it. The knob is judged by the aim from the look pose
+                # against the first aim (`button`): two of the wrist's own readings from there, on one footing
+                at = (way.sighted[0], way.sighted[1], at[2])
             held_z = z if z is not None else held_z
             knob = knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press)
             _note_frames(ctx, popped=bool(knob.popped) if knob.found else None)
@@ -3918,7 +3928,7 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
                 "[press_demo] the knob is not up (%s): pressing once more — the same press, from the look pose"
                 % ("%.1f mm above the lid" % knob.up_mm if knob.up_mm is not None else "not judged")
             )
-            way, why, _kind = rp.solve_way_in(ctx, cfg, button, tilt, ctx.client.joints())
+            way, why, _kind = rp.solve_way_in(ctx, cfg, at, tilt, ctx.client.joints())
             if way is not None:
                 legs = rp.way_in_legs(ctx, cfg, way)
                 why = rp._not_one_execution(ctx, legs)
@@ -3950,7 +3960,7 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
                 cfg,
                 runner,
                 eyes,
-                button,
+                at,
                 tilt,
                 lid_z,
                 "the lid at %.3f (the press's top %.3f%s%s)"

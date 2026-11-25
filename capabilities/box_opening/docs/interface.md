@@ -61,7 +61,10 @@ beside the container, and goes home. It has one action, `open_box`:
    look is planned again over it, as every look is, and flown, and the aim
    asked there (see "The look again"). At most two looks again; with no lid in
    that frame, or no button from them either, `no_button`.
-1. **Press:** the fingers, closed, press the button in joint impedance. The arm
+1. **Press:** the fingers, closed, press the button in joint impedance. Where
+   it can, the hand first stops over the button with the wrist camera looking
+   straight down at it, and the pads are moved over the button it sees there
+   before they come down (see "The sight before the press"). The arm
    feels where the pads meet the lid, watching its whole way down, and the
    stroke stops there. From where the arm then stands it pushes 10 N straight
    down on the pads (the joint springs' reference set for that force, not a
@@ -1254,6 +1257,66 @@ pressed, and the arm leaves up and back clear of the box before home, as it
 does where the stroke's own goal does not start. The default, `impedance`, is
 the run as flown; any other value is refused before anything runs
 (`bad_config`). `position` has not been flown.
+
+### The sight before the press
+
+The button is aimed once, from the look pose some 0.30 m off and 25-45
+degrees oblique, and on its own that aim can be 2-3 cm off a 44 mm button.
+So, before the arm leaves the look pose, the press plans a stop on its way
+in: the hand turned down as the press turns it, with the wrist camera's lens
+straight over the aimed button and the point the press's heights go by 80 mm
+over its top. The arm flies there in one motion and stands still; an arm
+that has not come to rest there is not sighted. Colour frames taken after
+it stood still, each frame once, are turned, in software, into a picture
+looking straight down. In that picture the button's seam is found as a circle,
+and its size against the button's sets the scale (no depth: the wrist camera
+reads nothing that near). Two frames must agree within 2 mm, within 0.6 s.
+A button seen within 30 mm of the aim is followed: a level line, the hand's
+attitude held, solved from where the arm stands, puts the real pad ends over
+it, and the stroke comes down from there. Where that line or its stroke
+does not fly (near the edge of the arm's reach, a joint limit down the
+line), the pad ends are brought 0.75, 0.5 or 0.25 of the way from the aim to
+it, the first that flies, and the run says how much and why not the whole.
+The run then goes by the button where it was seen: a second press and the
+grip are solved onto it. The box is not moved: the lid's spot and the room
+round it stay keyed to the box where the cameras put it. A second press
+sights again. Every way back to the look pose reverses what flew (the
+stroke, the level line, the turn down and the move to the stop) or, where
+the rise cannot go back up the stroke, walks there from its top; either way
+it ends at the look pose the aim was read at (the press-only way home and
+the stops over the box go home as before). The knob is judged against the first aim:
+after a sight, from the pose that aim was read at, so that the wrist
+camera's mount and depth errors are those of the aim's own reading and
+cancel; without one, as before, from the re-aimed look pose the way in turned
+down from. How long the sight's plan took is in the run log's `sight` row
+(`plan_ms`), whether a sight came of it or not, and beside it how long the
+arm stood for the sight (`look_ms`: from the arm at rest to the sight's
+answer, found or not; empty where it was not looked for).
+
+Where the sight is not followed (no circle, frames that do not agree, a
+button more than 30 mm from the aim, none of its lines one the arm can fly,
+an arm not at rest, an error anywhere between the stop and the stroke), the
+press comes down where it would have without the sight: the heights point
+over the aimed button. It never stops a run; a cancel still cancels. Where
+it cannot be planned, nothing changes and the way in flies as before (one
+motion): the hand would lean the button out of the camera's picture, the
+line from the stop over the button meets a joint limit, `air_control` is
+`position`, or the run has no wrist camera. On flatbot's chain the stop is
+planned only out to about 0.68-0.70 m, and only where the press is straight
+down: the stop stands the hand 65 mm further out than the press, so a box
+0.75 m or more out gets the way in as before. Each case says itself on the console (`SIGHT: ...`) and in the
+flight view under the press (`note  looked before the stroke: ...`,
+`note  no look before the stroke: ...`), and in the run log's `sight` row.
+The frame the sight used is saved as the aim's are (`wrist-sight-*`).
+
+What it costs, where it is planned: the way in is two motions with a stop,
+not one. Re-timed on flatbot's chain for buttons 0.55-0.66 m out, the motion
+alone is 1.4-1.9 s longer (a re-aim before the stop, the level line, 20 mm
+more stroke); the stop adds the arm's settle (0.8 s for the looks in the
+joint impedance, at most 1.2 s), the frames (0.15-0.25 s at 15 fps) and
+about 0.1 s of planning: some 2.5-3 s a press. The switch is
+`reach_press.SIGHT_BEFORE_PRESS`; off, the press is the one before it.
+Not flown.
 
 ### The planner's world
 
