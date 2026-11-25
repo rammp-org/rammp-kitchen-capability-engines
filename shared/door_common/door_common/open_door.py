@@ -371,7 +371,8 @@ def detect_handle():
                     empty_proposals += 1
                 if f is None:
                     say(f"  no SAM 3 mask with its RGB-D frame on look {tag} (retry {attempt}/{MAX_EMPTY_RETRIES})")
-                    time.sleep(0.5)
+                    if attempt < MAX_EMPTY_RETRIES:
+                        time.sleep(0.5)
                     continue
             else:
                 f = cam.grab()
@@ -407,7 +408,8 @@ def detect_handle():
             if det is not None:
                 break
             say(f"  no detection on look {tag} (retry {attempt}/{MAX_EMPTY_RETRIES})")
-            time.sleep(0.5)
+            if attempt < MAX_EMPTY_RETRIES:
+                time.sleep(0.5)
         else:
             why = getattr(detector, "last_miss", "")
             error = NoHandleProposal if tag == "1" and empty_proposals == MAX_EMPTY_RETRIES else Refused
