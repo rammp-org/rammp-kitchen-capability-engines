@@ -84,7 +84,19 @@ beside the container, and goes home. It has one action, `open_box`:
    (`contact_early`, `contact_late`).
 1. **Grip:** straight from the press, the fingers rise, open, come down around
    the button and close on it. A grip that misses goes back to the look pose and
-   tries again from there, a centimetre lower.
+   tries again from there, a centimetre lower. Every grip's last stretch down
+   (the last 35-45 mm, at the press's touch speed) flies on its own from rest,
+   with no planning running beside it, and the arm feels where the open
+   fingertips meet something, as the press does: the stretch stops there, the
+   hand comes back up a few millimetres and the fingers close (run-log rows
+   `grip_watch` on every grip, `grip_touch` where something was met). From the
+   look pose that is one more stop, a fraction of a second, over the knob.
+   It bounds the push on what a pad comes down on, it does not hold it to a
+   force: a pad is felt once the arm lags by about 3 mm (3-8 N at the run's
+   stiffness) and stopped within a poll or two, about 8-20 N, where an
+   unwatched way down pushed 10-56 N on a pad met 9-20 mm early. A knob that
+   gives way softly may be pushed flush, and latch the box again, before it is
+   felt. Not flown.
    Back at the look pose after a press (the grip from the press missed, or the
    press was not felt), the wrist aims at the button again and compares the
    reading with where the box was last seen from that pose: two readings from
@@ -1279,7 +1291,8 @@ flies in position control instead:
   `air_switch`);
 - the stroke (`depth:approach`, `depth:press`), its push (`depth:push`), the hold, the grip and
   everything after fly as they did. The grip's own way down to the knob stays
-  one motion in the impedance.
+  in the impedance: one motion to over the knob, then its watched last stretch
+  (see "Grip" above).
 
 What it costs: the way in is two motions with a stop between, not one, and a
 run is about 2.5 s longer (re-timed on those two runs' paths: the look 1.4 to

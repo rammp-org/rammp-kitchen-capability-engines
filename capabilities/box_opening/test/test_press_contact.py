@@ -84,6 +84,24 @@ def _free(noise=0.0003, lag=-0.002, seed=0):
     return lambda t, z: z + lag + float(rng.normal(0.0, noise))
 
 
+def test_a_watch_first_polled_late_records_how_far_below_where_it_arms_the_reference_already_stood():
+    """The client polls stop_when only once what its execution hosts has run: a watch first polled
+    with the reference 6 mm below where it arms records that, and one polled from the start 0."""
+    late, client = _watch()
+    z, dt = _ref()
+    blind = (z[0] - (late.arm_z - 0.006)) / (z[0] - z[-1])  # the fraction the reference stands 6 mm below
+    _fly(lambda f: f >= blind and late(f), client, z, dt, _free())
+    assert late.record()["first_polled_below_arm_mm"] == pytest.approx(6.0, abs=0.5)
+    timely, client = _watch()
+    _fly(timely, client, z, dt, _free())
+    assert timely.record()["first_polled_below_arm_mm"] == 0.0
+
+
+def test_a_watch_never_polled_records_no_first_poll():
+    det, _client = _watch()
+    assert det.record()["first_polled_below_arm_mm"] is None
+
+
 def test_a_hard_stop_is_met_where_the_pads_stopped_and_the_stroke_ends_as_far_past_it_as_planned():
     """The box 10 mm higher than the cameras put it: the pads stop at 0.31.
     The stroke was planned 32 mm past the top; it ends 32 mm past where

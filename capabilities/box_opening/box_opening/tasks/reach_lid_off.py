@@ -38,13 +38,14 @@ after the press as before (reach_press._fly_way_in).
   DIRECT  first, straight from the first press's hold (GRIP_FROM_PRESS):
           up GRIP_RISE_M, the fingers opening to the knob's width once the
           pads have left the knob (GRIP_OPEN_ABOVE_HELD_M), down the stroke's
-          line to the grip's height (grip_lid_z),
+          line to the grip's height (grip_lid_z), watched (grip_down),
           the close and the LIFT below — no way back, no look. On air, back
           to the look pose, and the LOOK as below, the GRIP from there.
   GRIP    up: the fingers open as the hand comes down from the look pose —
           the way in once more, its stroke the grip's: straight down until the
           closed pads' reference stands GRIP_BELOW_LID_M under the lid — ONE
-          execution. While it flies (grip_ahead): the lift, and from where it
+          execution, its last stretch on its own from rest and watched
+          (grip_down, one more stop). While it flies (grip_ahead): the lift, and from where it
           ends the lid's spot, the carry there and home after the set-down.
           The fingers close: on
           air (past the grip band's closed end) they open again and the hand
@@ -107,16 +108,27 @@ after the press as before (reach_press._fly_way_in).
 
 Every move up to the release flies in the driver's joint impedance under the
 run's one gains spec (depth_press.COMPLIANT_GAINS, RIGID), unguarded, merged
-where its legs meet: nothing the run reads stops the arm. The way home after
+where its legs meet, with no torque guard. The way home after
 the release flies slow under MEDIUM, as home_arm's does. Its free-air lines — the rise and
 the way back, the grip's way up, the clear, the retreat — fly at
 reach_press.free_line_speed; the legs that meet the box, the knob or the
 table at their own. It decides only what it must:
 the knob up or not, the box where it was, the fingers on the knob or on
-air, where the lid goes, the lid still in them at the table. Contact is bounded by the spring,
-not stopped by a guard: the grip's pads ride on the lid where it stands
-higher than estimated. The set-down is the one move the arm's own feel
-ends: it stops where the lid meets the table (watch_setdown, cut there) and
+air, where the lid goes, the lid still in them at the table. Three moves
+are ended by the arm's own feel (press_contact.PressContact: the pads
+lagging their reference): the press (depth_press.watch_press), every grip's
+last stretch down to the knob, and the set-down. The grip's (grip_down,
+GRIP_TOUCH; not flown in this form) flies on its own from rest,
+hosting no planning, and is cut where the open fingertips meet something,
+then comes back up touch_rise_m before the fingers close. It bounds the
+push, it does not hold it to a force: it feels a pad once the arm lags its
+reference by about 3 mm (3-8 N at the run's stiffness, ~1130-2800 N/m
+straight down at the pads, depth_press's figures) and stops within a poll
+or two (0.05 s each), the reference some 7 mm on at TOUCH_SPEED's ~55 mm/s
+by then: about 8-20 N, against 10-56 N for a pad held 9-20 mm before an
+unwatched way down's end. A knob that gives way softly may be pressed flush
+before it is felt, and latch the box again. The set-down ends
+where the lid meets the table (watch_setdown, cut there) and
 lets go there, and only there; it goes no lower than SETDOWN_PAST_M under
 where the run has the lid meet the table (the cameras' table, moved by what
 the fingers found of the lid's top: setdown_table_z). Where it looks at rest — the
@@ -125,6 +137,7 @@ close on the knob, it waits for the arm to stand still (runner.wait_still):
 between motions, never a stop.
 """
 
+import dataclasses
 import json
 import math
 import os
@@ -287,7 +300,13 @@ GRIP_RISE_LEAST_M = 0.030
 # them came down on — the reference stops there, nothing pressed on down, and the hand comes back up
 # touch_rise_m before the fingers close: their pads end GRIP_TOUCH_CLEAR_M over what they met, round
 # the knob's base on a lid, over the top of a knob (a close on air, the look to aim again, the box
-# still open). Nothing met, the way down ends where it always did.
+# still open). Nothing met, the way down ends where it always did. Every grip's way down is watched so
+# (grip_down: straight from the press, from the look pose, its second try, and on a box found open), as
+# an execution of its own from rest that hosts no planning: the client polls a stop_when only once
+# what its execution hosts has run, and the carry and home planned there (part of grip_ahead's
+# 0.71-2.29 s; the way down flies ~1 s) left the watch blind for as long as they took. Off: every grip
+# flies as before it was watched — the grip from the look pose one execution, the carry and home planned
+# while the grip straight from the press comes down.
 GRIP_TOUCH = True
 GRIP_TOUCH_ARM_M = 0.008
 GRIP_TOUCH_CLEAR_M = 0.0015
@@ -2518,12 +2537,15 @@ class GripDescent:
     `legs` [(name, joint points, speed)] as a press stroke's
     (reach_press.way_in_legs flies them), 'grip:approach' at grip_speed to
     GRIP_SLOW_M above where it ends, then 'grip:down' at TOUCH_SPEED, the
-    closed pads' reference ending at `pad_z`."""
+    closed pads' reference ending at `pad_z`; `t0` the tool frame at `q0`,
+    where a straight line up off it ends (reach_press._rise_legs), as a
+    press stroke's."""
 
     legs: list
     quat: list
     q0: list
     pad_z: float
+    t0: list = None
 
 
 def grip_descent(chain, cfg, q0, quat, lid_z):
@@ -2551,7 +2573,11 @@ def grip_descent(chain, cfg, q0, quat, lid_z):
     if down is None:
         return None, why
     return GripDescent(
-        [("grip:approach", approach, cfg.grip_speed), ("grip:down", down, dp.TOUCH_SPEED)], list(quat), q0, end
+        [("grip:approach", approach, cfg.grip_speed), ("grip:down", down, dp.TOUCH_SPEED)],
+        list(quat),
+        q0,
+        end,
+        [float(v) for v in t0],
     ), None
 
 
@@ -2603,12 +2629,23 @@ def solve_grip_way(ctx, cfg, button, tilt, q_from, lid_z, shifted=False):
     return way, None
 
 
-def _grip_backwards(ctx, way, world):
+def _grip_backwards(ctx, way, world, q=None):
     """The grip's way down backwards, from the knob to the look pose: up
-    its stroke, then _down_backwards."""
+    its stroke, then _down_backwards. With `q` (the arm's joints, where a
+    contact stopped the way down above its planned end, or before it
+    began) the way up starts there, as the press's way back from its hold
+    does (way_back_legs: onto the stroke and up it, else a straight line up
+    to its start and a walk from there to the look pose), its rise named
+    'grip:up' — None where no way up or back flies."""
+    if q is not None:
+        legs, where, why = way_back_legs(ctx, way, q)
+        if where is not None:
+            log.info("[press_demo] no way back from where the hand stands (the way %s: %s)" % (where, why))
+            return None
+        return [dataclasses.replace(lg, name="grip:up") if lg.name == "depth:rise" else lg for lg in legs]
     pts = []
     for _name, p, _speed in way.stroke.legs:
-        pts += [[float(v) for v in q] for q in (p[1:] if pts else p)]
+        pts += [[float(v) for v in x] for x in (p[1:] if pts else p)]
     legs = (
         [dp.compliant_line(ctx, "grip:up", pts[::-1], way.stroke.quat, rp.free_line_speed(ctx), world)]
         if len(pts) > 1
@@ -3464,9 +3501,9 @@ def plan_home_after(ctx, cfg, carry):
     """The retreat back up from the set-down and home planned from its
     end, with the lid lying at the spot (ctx.lid_at, for this plan only):
     the legs after the release, home under its own gains (MEDIUM), or
-    (None, why). Planned with the carry while the hand comes down to the
-    knob (CarrySearch.finish, the grip's lookahead) — never while the
-    set-down flies: that execution hosts nothing (choose_and_carry)."""
+    (None, why). Planned with the carry by the grip's lookahead
+    (CarrySearch.finish) — never while the set-down flies: that execution
+    hosts nothing (choose_and_carry)."""
     from box_opening.runtime import approach
 
     world = _full_world(ctx)
@@ -3758,8 +3795,11 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
     once the pads are GRIP_OPEN_ABOVE_HELD_M over where the hold held them
     (else at the rise's top), the lift and the first spot the hand reaches planned while it does
     (grip_ahead_rise, from the way down's end), the way down to the knob
-    once they are open, the carry and home planned while it comes down
-    (grip_ahead_down), then the close and the lift to the set-down as from
+    once they are open — the carry and home planned first, the arm at the
+    rise's top (_grip_ahead_at_top), then the way down watched, hosting
+    nothing (grip_down, GRIP_TOUCH), the plan dropped where it meets
+    something; without GRIP_TOUCH unwatched, the carry and home planned while it comes down
+    (grip_ahead_down) — then the close and the lift to the set-down as from
     the look pose (_close_and_carry). Returns its exit code where it ended the
     run (0: the lid off, the arm home); _MISSED where the hand went back to
     the look pose instead — the lines did not fly, the close did not hold
@@ -3784,10 +3824,10 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         from_press=True,
     )
     from box_opening.runtime import approach
-    from box_opening.tasks.press_contact import PadsAbove, PressContact, pads_z
+    from box_opening.tasks.press_contact import PadsAbove, pads_z
 
     chain = approach._chain()
-    top_z, end_z = pads_z(chain, rise[-1]), pads_z(chain, down[-1])
+    top_z = pads_z(chain, rise[-1])
     log.info(
         "[press_demo] GRIP STRAIGHT FROM THE PRESS: up %.0f mm, the fingers opening round the knob once the pads "
         "are %.1f mm over the hold (else at the top), then down to the knob — to where the open fingertips meet the "
@@ -3817,18 +3857,14 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
     # the rise ends at the hand's attitude at its top: the stroke's, or leaning further back (grip_from_hold_lines)
     quat_top = [float(v) for v in dp.mat_to_quat_xyzw(np.asarray(chain.fk(rise[-1])[0], float))]
     up = dp.exit_line(ctx, "grip:rise", rise, quat_top, rp.free_line_speed(ctx), world)
-    lower = dp.compliant_line(ctx, "grip:down", down, quat, dp.TOUCH_SPEED, world)
-    touch = None
-    if GRIP_TOUCH:
-        # stopped where the open fingertips meet the lid (or a knob), nothing pressed on down past it
-        touch = PressContact(chain, ctx.client, end_z, top_z - GRIP_TOUCH_ARM_M, 0.0, end_z, cut=True)
-        lower.stop_when = touch
-    # the lookahead split over both (grip_ahead_rise, grip_ahead_down): the lift and the
-    # first spot while the hand rises, the carry and home while it comes down
+    q_end = [float(v) for v in down[-1]]  # where the way down is planned to end: what the lift is planned from
+    # the lookahead split in two (grip_ahead_rise, grip_ahead_down): the lift and the first spot while the
+    # hand rises; the carry and home with the arm at the rise's top (GRIP_TOUCH), else while the way down
+    # flies
     res = runner.run(
         [up, opened],
         execute=True,
-        lookahead=lambda _end: grip_ahead_rise(ctx, cfg, eyes, lower.goal_joints, quat, room),
+        lookahead=lambda _end: grip_ahead_rise(ctx, cfg, eyes, q_end, quat, room),
     )
     first, rise_stood = runner.lookahead_result, runner.lookahead_stood_s
     runner.note(
@@ -3839,6 +3875,27 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         pads_z=None if off.at is None else off.at[1],
         highest_mm=None if off.highest is None else round(1000 * (off.highest - held_z), 1),
     )
+
+    def risen():
+        # the hand comes down only from where it cleared the knob, as the arm measured its pads at the top
+        q = [float(v) for v in ctx.client.joints()]
+        return q, max(pads_z(chain, q), off.highest if off.highest is not None else -math.inf) - held_z
+
+    # judged before anything is planned at the top (GRIP_TOUCH), else once the fingers are open, as before
+    q_top, rose = risen() if GRIP_TOUCH else (None, None)
+    ahead, ahead_s = None, None
+    if GRIP_TOUCH and first is not None and all(r.ok for r in res) and rose >= GRIP_RISE_LEAST_M:
+        # the carry and home for where the way down is planned to end, planned with the arm at the rise's
+        # top in free air, the fingers opening as it plans, once the rise has cleared the knob (else the
+        # way down does not fly): never while the watched way down flies (its watch would see nothing
+        # until they were planned), nor with the hand standing round the knob after it (a pad could rest
+        # on something under the watch's thresholds all that time). Not hosted by the rise: its gate that
+        # sends the open (opened.send_when) is polled only once what the rise hosts has run, and
+        # grip_ahead_rise outlasts the rise already. Dropped where the way down meets something (planned
+        # from its end, which the hand then stands above)
+        t0 = time.monotonic()
+        ahead = _grip_ahead_at_top(runner, first)
+        ahead_s = time.monotonic() - t0
     spread = runner.join_pending()  # the fingers open before the hand comes down round the knob
     if not all(r.ok for r in res) or (spread is not None and not spread.ok):
         bad = res[-1] if not all(r.ok for r in res) else spread
@@ -3853,9 +3910,8 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
             % (bad.detail or bad.outcome)
         )
         return _MISSED if _way_back(ctx, cfg, runner, way, ctx.client.joints(), dp.DepthPress(free=True)) is None else 1
-    # the hand comes down only from where it cleared the knob, as the arm measured its pads at the top
-    q_top = [float(v) for v in ctx.client.joints()]
-    rose = max(pads_z(chain, q_top), off.highest if off.highest is not None else -math.inf) - held_z
+    if q_top is None:
+        q_top, rose = risen()
     if rose < GRIP_RISE_LEAST_M:
         runner.note("reach_grip_refused", attempt=0, why="rose %.1f mm" % (1000 * rose), from_press=True)
         log.info(
@@ -3863,12 +3919,16 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
             "coming down on it — back to the look pose to look at the knob" % (1000 * rose, 1000 * GRIP_RISE_LEAST_M)
         )
         return _MISSED if _way_back(ctx, cfg, runner, way, q_top, dp.DepthPress(free=True)) is None else 1
-    res = runner.run([lower], execute=True, lookahead=None if first is None else (lambda _end: grip_ahead_down(first)))
-    ahead = _lookahead(runner)
-    if ahead is not None and isinstance(ahead[2], CarryAhead):
-        # how long the arm stood for the lookahead, at the rise's top and at the way down's bottom
-        stood = [v for v in (rise_stood, ahead[2].host_stood_s) if v is not None]
-        ahead[2].host_stood_s = round(sum(stood), 4) if stood else None
+    touch = None
+    if GRIP_TOUCH:
+        res, touch = grip_down(ctx, runner, chain, down, quat, world, 0, held_z=held_z)
+    else:
+        lower = dp.compliant_line(ctx, "grip:down", down, quat, dp.TOUCH_SPEED, world)
+        res = runner.run(
+            [lower], execute=True, lookahead=None if first is None else (lambda _end: grip_ahead_down(first))
+        )
+        ahead = _lookahead(runner)
+        ahead_s = None if ahead is None or not isinstance(ahead[2], CarryAhead) else ahead[2].host_stood_s
     if not all(r.ok for r in res):
         if _started(res[-1]):
             log.info("[press_demo] STOP: the way down to the knob stopped (%s) — the arm holds" % res[-1].detail)
@@ -3876,7 +3936,12 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
             return 1
         return _MISSED if _way_back(ctx, cfg, runner, way, ctx.client.joints(), dp.DepthPress(free=True)) is None else 1
     if touch is not None and touch.contact is not None:
-        ahead = _grip_at_touch(ctx, runner, chain, touch, quat, held_z, world)
+        ahead = None  # planned from the way down's end, which the hand stands above: _grip_at_touch
+    if ahead is not None and isinstance(ahead[2], CarryAhead):
+        # how long the arm stood for the lookahead: at the rise's top, and for the carry and home there
+        # (GRIP_TOUCH) or at the way down's bottom
+        stood = [v for v in (rise_stood, ahead_s) if v is not None]
+        ahead[2].host_stood_s = round(sum(stood), 4) if stood else None
 
     def back_out(why, opened=True):
         log.info("[press_demo] the grip straight from the press: %s — back to the look pose to look at the knob" % why)
@@ -3905,46 +3970,92 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
     return _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, 0, room, back_out, miss)
 
 
-def _grip_at_touch(ctx, runner, chain, touch, quat, held_z, world):
+def grip_down(ctx, runner, chain, down, quat, world, attempt, held_z=None):
+    """Every grip's last stretch down to the knob, watched (GRIP_TOUCH): from where the arm stands at
+    rest at `down`'s first joints (runner.wait_still first), 'grip:down' along `down` at TOUCH_SPEED, an
+    execution of its own that hosts nothing, so its contact watch is polled from the first moment
+    (client.execute polls a stop_when only once what an execution hosts has run). The watch is a
+    PressContact on the closed pads' point, armed GRIP_TOUCH_ARM_M below where the descent starts, cut
+    where the open fingertips meet something (past 0): any contact is taken for the lid, and the very
+    next thing sent is 'grip:settle' (_grip_at_touch). Noted 'grip_watch': the attempt (0: straight
+    from the press), whether the wait for rest timed out, whether it met something and the watch's
+    record; `held_z` where the press held the pads, for the touch's note. Returns (the descent's results, the watch)."""
+    from box_opening.tasks.press_contact import PressContact, pads_z
+
+    still = runner.wait_still("grip:down")  # from rest: the pads lag a reference that starts from rest, armed below it
+    lower = dp.compliant_line(ctx, "grip:down", down, quat, dp.TOUCH_SPEED, world)
+    top_z, end_z = pads_z(chain, down[0]), pads_z(chain, down[-1])
+    # stopped where the open fingertips meet the lid (or a knob), nothing pressed on down past it
+    touch = PressContact(chain, ctx.client, end_z, top_z - GRIP_TOUCH_ARM_M, 0.0, end_z, cut=True)
+    lower.stop_when = touch
+    res = runner.run([lower], execute=True)
+    settled = None
+    if all(r.ok for r in res) and touch.contact is not None:
+        settled = _grip_at_touch(ctx, runner, chain, touch, quat, world, attempt, held_z)
+    runner.note(
+        "grip_watch",
+        attempt=attempt,
+        from_press=attempt == 0,
+        # flown all the same where the wait for the arm to stand still timed out (None: no stream to wait on)
+        still_timed_out=None if still is None else bool(still[1]),
+        met=touch.contact is not None,
+        settled=settled,
+        contact=touch.record(),
+    )
+    return res, touch
+
+
+def _grip_at_touch(ctx, runner, chain, touch, quat, world, attempt, held_z=None):
     """The way down to the knob ended where the open fingertips met something (`touch`, the way down's
-    PressContact): the hand back up touch_rise_m from where it stands, for the fingers to close round
-    the knob's base and not into the lid — where that short line does not fly, they close where it
-    stands, said. Returns None: the lift planned ahead started from the way down's planned end, lower
-    than this, and is not flown; the close plans its own from where the hand is (_close_and_carry)."""
+    PressContact, cut there): the hand back up touch_rise_m from where it stands — the next thing the
+    arm is sent, nothing planned or looked at first — for the fingers to close round the knob's base
+    and not into the lid; where that short line does not fly, they close where it stands, said. Noted
+    'grip_touch' after it, flown or not: where they met (how far over the way down's planned end, and over
+    where the press held the pads, `held_z`, on the grip straight from it). Whatever was planned ahead
+    from the planned end, lower than this, is not flown: the close plans its own from where the hand
+    is (_close_and_carry). Returns whether the settle flew."""
     from box_opening.tasks.press_contact import pads_z
 
     q = [float(v) for v in ctx.client.joints()]
     up = touch_rise_m(ctx.model)
     met = float(touch.contact[1])
-    runner.note(
-        "grip_touch",
-        met_z=round(met, 4),
-        over_held_mm=round(1000 * (met - held_z), 1),
-        how=touch.how,
-        pads_z=round(pads_z(chain, q), 4),
-        rise_mm=round(1000 * up, 1),
-    )
-    log.info(
-        "[press_demo] GRIP: the open fingertips met the lid with the pads at %.3f, %.0f mm over where the press held "
-        "them — up %.1f mm for the pads to close round the knob's base" % (met, 1000 * (met - held_z), 1000 * up)
-    )
     _R, t = chain.fk(q)
     pts, why = chain.straight_line(q, [float(t[0]), float(t[1]), float(t[2]) + up], quat)
     if pts is not None:
         why = dp.line_refusal(chain, pts)
-    if pts is None or why is not None:
-        log.info("[press_demo] GRIP: no way up off the touch (%s): the fingers close where the hand stands" % why)
-        return None
-    res = runner.run(
-        [dp.compliant_line(ctx, "grip:settle", [[float(v) for v in p] for p in pts], quat, dp.TOUCH_SPEED, world)],
-        execute=True,
-    )
-    if not all(r.ok for r in res):
-        log.info(
-            "[press_demo] GRIP: the way up off the touch did not fly (%s): the fingers close where the hand stands"
-            % (res[-1].detail or res[-1].outcome)
+    flew = False
+    if pts is not None and why is None:
+        res = runner.run(
+            [dp.compliant_line(ctx, "grip:settle", [[float(v) for v in p] for p in pts], quat, dp.TOUCH_SPEED, world)],
+            execute=True,
         )
-    return None
+        flew = all(r.ok for r in res)
+        why = None if flew else res[-1].detail or res[-1].outcome
+    runner.note(
+        "grip_touch",
+        attempt=attempt,
+        from_press=attempt == 0,
+        met_z=round(met, 4),
+        above_end_mm=round(1000 * (met - touch.end_z), 1),
+        over_held_mm=None if held_z is None else round(1000 * (met - held_z), 1),
+        how=touch.how,
+        pads_z=round(pads_z(chain, q), 4),
+        rise_mm=round(1000 * up, 1),
+        settled=flew,
+    )
+    log.info(
+        "[press_demo] GRIP: the open fingertips met the lid with the pads at %.3f, %.0f mm over the way down's end%s "
+        "— %s"
+        % (
+            met,
+            1000 * (met - touch.end_z),
+            "" if held_z is None else ", %.0f mm over where the press held them" % (1000 * (met - held_z)),
+            "up %.1f mm for the pads to close round the knob's base" % (1000 * up)
+            if flew
+            else "no way up off the touch (%s): the fingers close where the hand stands" % why,
+        )
+    )
+    return flew
 
 
 def _fingers_shut(ctx, cfg, runner):
@@ -4195,22 +4306,23 @@ def _video_spot(ctx, eyes, drop):
         return
 
 
-def _back_out(ctx, cfg, runner, way, why, opened=True):
+def _back_out(ctx, cfg, runner, way, why, opened=True, live=False):
     """From the knob, the fingers on nothing they keep: back to the look
-    pose (_back_to_look), then home. Returns 1."""
-    code = _back_to_look(ctx, cfg, runner, way, why, opened)
+    pose (_back_to_look, `live` as there), then home. Returns 1."""
+    code = _back_to_look(ctx, cfg, runner, way, why, opened, live)
     return code if code is not None else _stop_home(ctx, cfg, runner, why)
 
 
-def _back_to_look(ctx, cfg, runner, way, why, opened=True):
+def _back_to_look(ctx, cfg, runner, way, why, opened=True, live=False):
     """From the knob, the fingers on nothing they keep: open (`opened`
     False: left as they are: open already, or shut on nothing, a close that
     reached its target: _close_reached), the grip's way down backwards to the look
-    pose (_grip_backwards: one execution), home planned from there while it
-    flies (ctx.home_ahead, for a stop there: _stop_home). Returns None at
-    the look pose, or 1 where the run stops, the arm let go: the fingers did
-    not open, or the way back out did not fly. `why` says what the STOP
-    line says first."""
+    pose (_grip_backwards: one execution; with `live`, solved from where the
+    arm stands, which is not where the way down was planned to end), home
+    planned from there while it flies (ctx.home_ahead, for a stop there:
+    _stop_home). Returns None at the look pose, or 1 where the run stops,
+    the arm let go: the fingers did not open, or the way back out did not
+    fly or was not found. `why` says what the STOP line says first."""
     world = _full_world(ctx)
     if opened:
         res = runner.run(
@@ -4220,7 +4332,13 @@ def _back_to_look(ctx, cfg, runner, way, why, opened=True):
             log.info("[press_demo] STOP: %s, and the fingers do not open (%s) — the arm holds" % (why, res[-1].detail))
             rp.let_go(ctx)
             return 1
-    back = _grip_backwards(ctx, way, world)
+    back = _grip_backwards(ctx, way, world, ctx.client.joints() if live else None)
+    if back is None:
+        log.info(
+            "[press_demo] STOP: %s, and no way back up the grip's line from where the hand stands — the arm holds" % why
+        )
+        rp.let_go(ctx)
+        return 1
     log.info("[press_demo] backing out the way the hand came down: %s" % ", ".join(lg.name for lg in back))
     # home from where the back-out ends, planned as it flies, as the way
     # back's (_press_and_back): 2026-10-28 16:24:21 stood 0.21 s there for it
@@ -4352,10 +4470,10 @@ class _GripShot:
         )
 
 
-def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True, seen=None):
+def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True, seen=None, live=False):
     """After a first close on air (`detail`, what it read) at `button`: the fingers
     open and the hand backs out the grip's way down to the look pose
-    (_back_to_look, home planned while it flies), and from there the wrist
+    (_back_to_look, `live` as there, home planned while it flies), and from there the wrist
     aims at the knob again (reach_press._aim, 'reach-regrip', on
     REGRIP_AIM_HITS agreeing hits), as knob_look does after a press. Its
     move is judged against `seen`, where the box was last seen from the look
@@ -4374,7 +4492,7 @@ def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True, seen=
     from `seen` (the one judged), whether the box was followed, and what
     follows."""
     seen = button if seen is None else seen
-    code = _back_to_look(ctx, cfg, runner, way, "the grip closed on air (%s)" % detail, opened)
+    code = _back_to_look(ctx, cfg, runner, way, "the grip closed on air (%s)" % detail, opened, live)
     if code is not None:
         runner.note("reach_regrip", found=None, outcome="the back-out did not fly")
         return None, code
@@ -4429,7 +4547,12 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
     fingers opening as it flies, ONE execution; while it flies, the lift,
     the lid's spot from the scene camera's map (`room`, judged while the
     press flew: room_ahead), the carry there and home after the set-down
-    (grip_ahead). The close, judged by the grip band, then the lift, the
+    (grip_ahead), all from where the grip is planned to end. With
+    GRIP_TOUCH that execution stops at rest at the top of 'grip:down' and
+    the last stretch is the watched way down (grip_down): where it meets
+    something, what was planned ahead is not flown, the lift is planned
+    from where the hand stands and a back-out is solved from there
+    (_grip_backwards). The close, judged by the grip band, then the lift, the
     clear, the carry and the set-down: ONE execution; the release; the
     retreat and home, ONE execution (_release_and_home). Where no carry
     and home planned ahead, as before: the lift and the clear alone, the
@@ -4443,6 +4566,7 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
     height; `seen` (None: `button`) where the box was last seen from the
     look pose, which the re-aim is judged against. Returns the exit code: 0
     with the lid set down and the arm home."""
+    from box_opening.runtime import approach
     from box_opening.tasks.press_demo import viz_hook
 
     world = _full_world(ctx)
@@ -4458,7 +4582,11 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
             "off" % ("re-aimed " if attempt > 1 else "", why),
         )
     legs = rp.way_in_legs(ctx, cfg, way, air=False)  # one motion on the spring, however the press's way in flies
-    names = [lg.name for lg in legs]
+    # watched (GRIP_TOUCH): 'grip:down' flies on its own from where the way in stops at rest (grip_down)
+    down = None
+    if GRIP_TOUCH and legs and legs[-1].name == "grip:down":
+        legs.pop()
+        down = [[float(v) for v in q] for q in way.stroke.legs[-1][1]]
     runner.note(
         "reach_grip",
         lid_z=round(lid_z, 4),
@@ -4472,11 +4600,12 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
     )
     log.info(
         "[press_demo] GRIP%s: the fingers open to the knob's width on the way down; ONE MOTION from the look pose "
-        "to the knob: %s — "
+        "to the knob: %s%s — "
         "the closed pads %.0f mm under %s%s"
         % (
             " ONCE MORE, lower" if attempt > 1 else "",
-            ", ".join(names),
+            ", ".join(lg.name for lg in legs),
+            "" if down is None else ", then grip:down on its own from rest, watched",
             1000 * GRIP_BELOW_LID_M,
             how,
             ", the hand %.0f deg short of straight down" % way.down.short_deg if way.down.short_deg else "",
@@ -4492,8 +4621,12 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
     # flown from where it comes back (a back-out plans its own, _back_out)
     ctx.home_ahead = None
     _video(ctx, "GRIP%s: the fingers open on the way down to the knob" % (" once more" if attempt > 1 else ""))
+    # the lift and all after it planned from where the grip is planned to end: the way in's end, or where
+    # the watched way down after it ends
     res = runner.run(
-        [opened, *legs], execute=True, lookahead=lambda end: grip_ahead(ctx, cfg, eyes, end, way.stroke.quat, room)
+        [opened, *legs],
+        execute=True,
+        lookahead=lambda end: grip_ahead(ctx, cfg, eyes, end if down is None else down[-1], way.stroke.quat, room),
     )
     ahead = _lookahead(runner)
     last = res[-1]
@@ -4512,9 +4645,36 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
         )
         rp.let_go(ctx)
         return 1
+    met = False  # the watched way down met something: the arm stands above its planned end
+    if down is not None:
+        res, touch = grip_down(ctx, runner, approach._chain(), down, way.stroke.quat, world, attempt)
+        last = res[-1]
+        if not all(r.ok for r in res):
+            if not _started(last):
+                # the fingers open over the knob, nothing touched: back out the way the hand came, then home
+                return _back_out(
+                    ctx,
+                    cfg,
+                    runner,
+                    way,
+                    "the last stretch down to the knob did not start (%s) — the lid is not taken off"
+                    % (last.detail or last.outcome),
+                    opened=False,
+                    live=True,
+                )
+            log.info(
+                "[press_demo] STOP: the way down to the knob stopped during grip:down (%s) — the arm holds"
+                % (last.detail or last.outcome)
+            )
+            rp.let_go(ctx)
+            return 1
+        if touch.contact is not None:
+            # planned from the way down's end, which the hand stands above: the close plans the lift from
+            # where it is (_close_and_carry), and the way back is solved from there (_grip_backwards)
+            met, ahead = True, None
 
     def back_out(why, opened=True):
-        return _back_out(ctx, cfg, runner, way, why, opened=opened)
+        return _back_out(ctx, cfg, runner, way, why, opened=opened, live=met)
 
     def miss(detail, air, empty=False):
         retry = air and attempt < GRIP_TRIES and yaw is not None
@@ -4530,7 +4690,9 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
                 "GRIP MISSED (%s): back out to the look pose, aim again, %.0f mm lower"
                 % (detail, 1000 * GRIP_RETRY_LOWER_M),
             )
-            regrip, code = _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=not empty, seen=seen)
+            regrip, code = _regrip(
+                ctx, cfg, runner, eyes, way, button, yaw, detail, opened=not empty, seen=seen, live=met
+            )
             if regrip is None:
                 return code
             lower = lid_z - GRIP_RETRY_LOWER_M
@@ -4560,6 +4722,7 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
             "the grip failed%s (%s) — the lid is not taken off"
             % (" twice, the second time %.0f mm lower" % (1000 * GRIP_RETRY_LOWER_M) if attempt > 1 else "", detail),
             opened=not empty,
+            live=met,
         )
 
     return _close_and_carry(ctx, cfg, runner, eyes, ahead, way.stroke.quat, attempt, room, back_out, miss)
@@ -4796,7 +4959,7 @@ def carry_ahead(ctx, cfg, eyes, q_end, room=None, home=False, q_grip=None):
 
 
 class CarrySearch:
-    """carry_ahead in two parts, each of which a motion can host (the grip
+    """carry_ahead in two parts, each of which can run apart (the grip
     straight from the press: grip_ahead_rise, grip_ahead_down), both on the
     main thread — the planner is called from nowhere else. start(): the
     room (room_for), the map and the first spot the hand reaches, no plan;
@@ -5042,9 +5205,10 @@ def grip_ahead_rise(ctx, cfg, eyes, q_grip, quat, room=None):
     where its clear ends, the room and the first spot the hand reaches
     (CarrySearch.start). The arm stood at the rise's top 0.01-1.50 s for
     the whole of grip_ahead (mean 0.48 s on 7 runs, the rise 0.77-1.17 s
-    against 0.71-2.29 s of it); the carry and home plans go to the way
-    down (grip_ahead_down), which hosted nothing. Returns (LiftOff, None,
-    CarrySearch) or (None, why, None)."""
+    against 0.71-2.29 s of it); the carry and home plans go to the rise's
+    top, before the way down (grip_ahead_down; hosted by the way down with
+    GRIP_TOUCH off). Returns (LiftOff, None, CarrySearch) or
+    (None, why, None)."""
     lift, why = plan_lift(ctx, cfg, q_grip, quat)
     if lift is None:
         return None, why, None
@@ -5057,14 +5221,36 @@ def grip_ahead_rise(ctx, cfg, eyes, q_grip, quat, room=None):
 
 
 def grip_ahead_down(first):
-    """grip_ahead's second part, while the hand comes down to the knob: the
-    carry to the spot grip_ahead_rise found and home after its set-down
-    (CarrySearch.finish) — `first` its result. Returns grip_ahead's:
-    (LiftOff, None, CarryAhead) or (None, why, None)."""
+    """grip_ahead's second part: the carry to the spot grip_ahead_rise found
+    and home after its set-down (CarrySearch.finish) — `first` its result.
+    With GRIP_TOUCH planned at the rise's top, before the watched way down
+    (_grip_ahead_at_top): never hosted by it, whose watch would see nothing
+    while it planned (client.execute polls a stop_when only once what its
+    execution hosts has run). Without it, hosted by the way down as before.
+    Returns grip_ahead's: (LiftOff, None, CarryAhead) or (None, why, None)."""
     lift, why, search = first
     if lift is None or search is None:
         return lift, why, None
     return lift, None, search.finish()
+
+
+def _grip_ahead_at_top(runner, first):
+    """grip_ahead_down called with the arm standing at the rise's top, as the client calls what an
+    execution hosts: whatever it raises is noted ('grip_ahead_failed') and taken for no plan made
+    ahead (None: the close plans the lift from where the hand stands, _close_and_carry), not for a
+    failed grip. A Ctrl+C that came while it planned (abort.LookaheadAborted) ends the run as a
+    Ctrl+C does."""
+    try:
+        return grip_ahead_down(first)
+    except abort.LookaheadAborted as e:
+        raise KeyboardInterrupt(str(e)) from e
+    except Exception as e:  # noqa: BLE001 -- as client.execute keeps a hosted lookahead's: no plan ahead
+        log.info(
+            "[press_demo] the carry and home planned ahead failed (%s): the lift planned from where the hand "
+            "stands, the spot after it" % e
+        )
+        runner.note("grip_ahead_failed", why="%s: %s" % (type(e).__name__, e))
+        return None
 
 
 def _ahead_note(ahead, off, flew, chosen, reach, stale=None):

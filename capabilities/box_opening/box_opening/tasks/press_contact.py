@@ -211,7 +211,8 @@ class PressContact:
     fraction, the joints) and the trajectory it sent (sent_traj), each kept
     sample once (feed). held_ref is the reference the driver holds where it
     cut: what the hold's spring pulls toward (depth_press.compliant_hold).
-    record() is what the run record keeps of it. With `final` it watches
+    record() is what the run record keeps of it, with how far the reference
+    already stood below `arm_z` when it was first polled (_first_poll). With `final` it watches
     only the execution's last stretch below `arm_z` (_Traj.frac_final_below):
     the set-down's, which flies in one execution from a lift off a box that
     may stand lower (reach_lid_off.watch_setdown). `rise_m`, `window_s` and
@@ -289,6 +290,9 @@ class PressContact:
         self.late_at = None  # (t, the pads measured) where nothing met was judged late
         self.verdict = None  # "early" | "late" | "failed": the press refused, stopped where it was judged
         self.failed = None  # what the watcher raised, where it failed
+        # how far the reference already stood below arm_z when this execution's watch was first polled
+        # (_first_poll): 0 polled in time, None never polled
+        self.first_polled_below_m = None
 
     # -- the samples ------------------------------------------------------------------
     def feed(self, t, frac, q):
@@ -454,6 +458,8 @@ class PressContact:
                 self.shadow._reset()
                 self.shadow._sent, self.shadow.traj, self.shadow.arm_frac = info, self.traj, self.arm_frac
         kept = info.get("feedback_q")
+        if self.first_polled_below_m is None:
+            self._first_poll(kept[-1][1] if kept else None)
         if not kept or (self._last_t is not None and kept[-1][0] <= self._last_t):
             return  # polled at every spin (~1 kHz); a sample is kept every 10th feedback
         new = []
@@ -464,6 +470,23 @@ class PressContact:
         for s in reversed(new):
             self._last_t = s[0]
             self.feed(float(s[0]), float(s[1]), s[2])
+
+    def _first_poll(self, frac):
+        """The watch first polled for this execution, the newest feedback kept at `frac` of the
+        trajectory's time (None: none kept yet): how far the reference already stood below arm_z
+        there (first_polled_below_m; 0 above it, or before the stretch it watches). The client polls
+        a stop_when only once what its execution hosts has run (client.execute's while_running):
+        for that long the watch judged nothing, and its samples are judged now, too late to stop
+        anything sooner. A measurement for the run record: no rule reads it."""
+        below = 0.0
+        if frac is not None and self.arm_frac is not None and frac >= self.arm_frac:
+            below = max(0.0, self.arm_z - self.traj.z_at(frac))
+        self.first_polled_below_m = below
+        if below > 0.0:
+            log.info(
+                "[press_demo] the contact watch was first polled with its reference %.1f mm below where it arms: "
+                "it saw nothing of that stretch while it flew" % (1000 * below)
+            )
 
     def __call__(self, progress):
         """stop_when: True once the reference stands where the stroke ends
@@ -553,6 +576,10 @@ class PressContact:
         refused = self.refusal()
         out = {
             "watched": self.armed_t is not None,
+            # how far below where it arms the reference already stood when it was first polled (0: in time)
+            "first_polled_below_arm_mm": None
+            if self.first_polled_below_m is None
+            else round(1000 * self.first_polled_below_m, 1),
             "cut_on": self.cut,
             "samples": self.samples,
             "feedback_gap_max_ms": None if self.gap_max_s is None else round(1000 * self.gap_max_s, 1),
