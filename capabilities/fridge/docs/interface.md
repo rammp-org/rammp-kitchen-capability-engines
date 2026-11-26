@@ -502,9 +502,12 @@ under `timing` to Open results and Open error payloads.
 look after three consecutive synchronized empty SAM replies, allowing a
 configured alternative view to start sooner.
 
-A pull or release/withdrawal request refuses if the arm still exceeds
-0.02 rad/s at the settle deadline. The release guard applies no additional
-joint-position tolerance to a stationary loaded arm.
+Release and withdrawal require seven finite joint velocities at or below
+0.02 rad/s in magnitude. When the driver exposes joint-state receipt age and
+a trajectory just ran, the sample must have arrived after its result. A
+completed pull records its existing endpoint geometry before a settle refusal.
+Release-only checks velocity again after opening the jaws. A stationary loaded
+arm keeps its existing joint-position and Cartesian endpoint policy.
 
 On ROS Humble, action-scoped subscriptions omit the automatic incompatible-QoS
 warning callback to avoid destruction races. Subscription QoS and matching

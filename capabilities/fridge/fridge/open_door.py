@@ -1322,7 +1322,7 @@ class GraspUnconfirmed(Refused):
 
 
 @timing.timed("grasp_close")
-def confirm_grasp(ai):
+def confirm_grasp(ai, *, after=None):
     if ai.gripper(1.0, force=F.GRASP_FORCE) is False:
         raise Refused("Gripper close did not complete. Check whether the hand is on the handle.")
     grip = ai.gripper_state() if hasattr(ai, "gripper_state") else None
@@ -1333,7 +1333,7 @@ def confirm_grasp(ai):
     if grip is not None and not grip.present:
         raise Refused("Gripper feedback unavailable. Check whether the hand is on the handle.")
     if not F.GRASP_GAP_MIN_M <= gap <= F.GRASP_GAP_MAX_M:
-        P._release(ai)
+        P._release(ai, after=after)
         if 0.0 <= gap < F.GRASP_GAP_MIN_M:
             raise GraspUnconfirmed(
                 f"Grasp unconfirmed (empty close, estimated gap {gap * 1000:.1f} mm). Gripper opened."
@@ -1363,6 +1363,7 @@ def retry_grasp_view(ai, planner, plan):
     if retreat is None:
         raise Refused(f"Grasp retry could not retreat: {why}")
     planner.join(retreat, plan["model"].cabinet())
+    P.wait_until_still(ai, after=planner.result_at)
     if not planner.run(retreat, "back to the wrist look"):
         raise Refused("Grasp retry could not reach the wrist look.")
 
@@ -1387,7 +1388,7 @@ def execute_open(ai, planner, plan, *, fast=False):
     st = ai.get_state()
     if float(st["gripper_pos"]) > 0.2:
         say("gripper is closed -- opening it first")
-        P._release(ai)
+        P._release(ai, after=planner.result_at)
     if not planner.run(plan["approach"], "approach"):
         raise Refused("Did not reach the grasp -- ABORT before closing the gripper.")
     e = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - cand["pos"]))
@@ -1396,7 +1397,7 @@ def execute_open(ai, planner, plan, *, fast=False):
         raise Refused(f"Tracking {e * 100:.1f} cm at the grasp -- ABORT, gripper untouched.")
     hook = cand.get("hook", False)
     if not hook:
-        confirm_grasp(ai)
+        confirm_grasp(ai, after=planner.result_at)
     dc.DOOR_FILE.unlink(missing_ok=True)
     relocalize.ref_file().unlink(missing_ok=True)
     save_door_geometry(**plan["door"], door_mid=plan.get("door_mid"))
@@ -1474,10 +1475,14 @@ def execute_open(ai, planner, plan, *, fast=False):
             return False
         save_door_geometry(door_open_deg=inferred, open_sign=model.df.sign)
         plan["after"].replan = abs(inferred - HOOK_ANGLE_DEG) > 1.0
-        P._release(ai, early=fast)
+        if planner.release_settle_error:
+            raise Refused(f"{planner.release_settle_error} -- stopping before release.")
+        P._release(ai, early=fast, after=planner.result_at)
         return True
     fitted = record_swing_hinge(arc.xy)  # the real hinge, for the angle below and all after (the push-open, the close)
     record_hand_angle(final["ee_pos"])  # the hand still holds the handle: it says where the door is
+    if finished and planner.release_settle_error:
+        raise Refused(f"{planner.release_settle_error} -- stopping before release.")
     deg = float(load_door()["door_open_deg"])
     if ok and deg < plan["swing_deg"] - F.SWING_ANGLE_TOL_DEG:
         say(f"  the door is ~{deg:.0f} deg open, over {F.SWING_ANGLE_TOL_DEG:.0f} short of {plan['swing_deg']}")
@@ -1498,7 +1503,7 @@ def execute_open(ai, planner, plan, *, fast=False):
         plan["after"].replan = True
     elif not ok:
         return False
-    P._release(ai, early=fast)  # held at the pull angle until the gripper clears the handle
+    P._release(ai, early=fast, after=planner.result_at)  # held at the pull angle until the gripper clears the handle
     say(f"released: gripper {float(ai.get_state()['gripper_pos']):.2f}")
     return True
 
@@ -1540,7 +1545,7 @@ class _AfterPull:
         door = load_door()
         say(f"  {P.after_release(self, planner, ai, door)}")
         planner.join(self.motion, FridgeModel(door).cabinet())
-        P.wait_until_still(ai)
+        P.wait_until_still(ai, after=planner.result_at)
         ok = planner.run(self.motion, self.title, impedance=P.AFTER_RELEASE)
         say(f"{self.title.upper()} {'DONE' if ok else 'STOPPED SHORT'}")
         return ok
@@ -1737,7 +1742,8 @@ def release_back_off(ai, planner, execute):
         say("DRY RUN (release + back-off) -- nothing commanded.")
         return True
     planner.join(motion, model.cabinet())
-    P._release(ai)
+    P._release(ai, after=planner.result_at)
+    P.wait_until_still(ai, after=planner.result_at)
     return planner.run(motion, "back off the handle")
 
 

@@ -184,7 +184,7 @@ def test_pull_release_uses_settle_speed_and_allows_loaded_offset(monkeypatch, sp
     motion = SimpleNamespace(q0=zeros, joined=plan, goals=[SimpleNamespace(pos=np.zeros(3))])
     idle = {"position": zeros, "ee_pos": np.zeros(7), "velocity": zeros}
     loaded = dict(idle, position=np.full(7, np.radians(2.5)), velocity=np.full(7, speed))
-    arm = Mock()
+    arm = Mock(spec=["get_state", "execute_joint_trajectory"])
     arm.get_state.side_effect = [idle, loaded]
     arm.execute_joint_trajectory.return_value = SimpleNamespace(error_code=0)
     monkeypatch.setattr(
@@ -192,19 +192,80 @@ def test_pull_release_uses_settle_speed_and_allows_loaded_offset(monkeypatch, sp
     )
     planner = planning.Planner(arm, None, None)
 
-    if speed:
-        with pytest.raises(Refused, match="still moving"):
-            planner.run(motion, "swing", settle_for_release=True)
-    else:
-        assert planner.run(motion, "swing", settle_for_release=True)
+    assert planner.run(motion, "swing", settle_for_release=True)
+    assert bool(planner.release_settle_error) == bool(speed)
 
 
 def test_release_only_wait_timeout_does_not_open_the_gripper(monkeypatch):
     from unittest.mock import Mock
 
-    arm = Mock(get_state=lambda: {"velocity": [0.1]})
+    arm = Mock(spec=["get_state", "gripper"], get_state=lambda: {"velocity": [0.1] * 7})
     stamps = iter([0.0, 0.31])
     monkeypatch.setattr(push_open, "time", SimpleNamespace(monotonic=lambda: next(stamps)))
-    with pytest.raises(Refused, match="no release or withdrawal"):
+    with pytest.raises(Refused, match="still moving"):
         push_open._release(arm)
     arm.gripper.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "state", [{}, {"velocity": []}, {"velocity": [0.0] * 6}, {"velocity": [np.nan] * 7}]
+)
+def test_invalid_velocity_never_authorises_release(monkeypatch, state):
+    from unittest.mock import Mock
+
+    jaw = Mock()
+    arm = SimpleNamespace(get_state=lambda: state, gripper=jaw)
+    stamps = iter([0.0, 0.31])
+    monkeypatch.setattr(push_open, "time", SimpleNamespace(monotonic=lambda: next(stamps)))
+    with pytest.raises(Refused, match="joint velocity feedback is invalid"):
+        push_open._release(arm)
+    jaw.assert_not_called()
+
+
+@pytest.mark.parametrize(("age", "settled"), [(0.05, True), (0.25, False), (0.3, False)])
+def test_release_velocity_must_follow_trajectory_receipt(monkeypatch, age, settled):
+    from fridge import planning
+
+    arm = SimpleNamespace(joint_states=lambda: SimpleNamespace(velocity=np.zeros(7), age_s=age))
+    monkeypatch.setattr(planning, "time", SimpleNamespace(monotonic=lambda: 10.25))
+    assert (planning.settle_error(arm, after=10.0) is None) == settled
+
+
+def test_moving_completed_pull_persists_door_angle_without_releasing(fridge):
+    arm, planner, _ = fridge
+    get_state = arm.get_state
+
+    def moving_after_pull():
+        state = get_state()
+        if len(arm.sent) == 2:
+            state["velocity"] = [0.1] * 7
+        return state
+
+    arm.get_state = moving_after_pull
+    with pytest.raises(Refused, match="still moving"):
+        open_door.run(arm, planner, True, push=False, around=False, swing_deg=60)
+    assert json.loads(open_door.dc.DOOR_FILE.read_text())["door_open_deg"] == pytest.approx(
+        60.0, abs=0.05
+    )
+    assert len(arm.sent) == 2
+    assert [entry[0] for entry in arm.grips] == [1.0]
+
+
+def test_release_only_refuses_withdrawal_if_arm_moves_after_jaws_open(fridge):
+    arm, planner, _ = fridge
+    assert open_door.run(arm, planner, False, save_door=True)
+    arm.q = open_door.LAST_PLAN["swing"].q_end.copy()
+    arm.gripper_pos = 0.8
+    get_state = arm.get_state
+
+    def moving_after_release():
+        state = get_state()
+        if arm.grips:
+            state["velocity"] = [0.1] * 7
+        return state
+
+    arm.get_state = moving_after_release
+    with pytest.raises(Refused, match="still moving"):
+        open_door.run(arm, planner, True, release_only=True)
+    assert [entry[0] for entry in arm.grips] == [0.0]
+    assert not arm.sent
