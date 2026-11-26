@@ -205,7 +205,7 @@ def test_push_reuse_requires_agreement_with_the_release_geometry(
         world=None, join=lambda *args: None, run=lambda *args, **kwargs: False
     )
 
-    assert not after.execute(None, planner)
+    assert not after.execute(SimpleNamespace(get_state=lambda: {"velocity": [0.0] * 7}), planner)
     assert observed == [reuse]
 
 

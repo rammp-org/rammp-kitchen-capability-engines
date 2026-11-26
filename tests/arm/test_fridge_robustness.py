@@ -170,3 +170,67 @@ def test_retry_stationary_check_requires_full_world_validation(fridge):
     arm.blend = lambda *args, **kwargs: SimpleNamespace(success=False, message="infeasible state")
     with pytest.raises(planning.StartNotClear, match="stationary check: infeasible state"):
         planner.preflight_start(obstacles, q, q, grasp_retry=True)
+
+
+@pytest.mark.parametrize("margin", [8.9, 9.0])
+def test_final_joined_hook_withdrawal_clearance(monkeypatch, margin):
+    from unittest.mock import Mock
+
+    joints = np.zeros((5, 7))
+    after = open_door.HookBackOff()
+    after.motion = SimpleNamespace(joined=None)
+    planner = Mock()
+    planner.join.side_effect = lambda motion, world: setattr(
+        motion, "joined", SimpleNamespace(q=joints)
+    )
+    planner.limit_margin.return_value = margin
+    monkeypatch.setattr(open_door, "load_door", lambda: {})
+    monkeypatch.setattr(open_door, "FridgeModel", Mock())
+    monkeypatch.setattr(push_open, "after_release", Mock(return_value="planned"))
+
+    if margin < open_door.HOOK_EXIT_LIMIT_MARGIN_DEG:
+        with pytest.raises(Refused, match="joint clearance"):
+            after.execute(Mock(get_state=lambda: {"velocity": [0.0]}), planner)
+        planner.run.assert_not_called()
+    else:
+        assert after.execute(Mock(get_state=lambda: {"velocity": [0.0]}), planner)
+        planner.run.assert_called_once()
+    assert planner.limit_margin.call_args.args[0] is joints
+
+
+@pytest.mark.parametrize("speed", [0.0, 0.1])
+def test_pull_release_uses_settle_speed_and_allows_loaded_offset(monkeypatch, speed):
+    from unittest.mock import Mock
+
+    from fridge import planning
+
+    # A successful driver result, a valid tool endpoint and a 2.5° loaded joint offset.
+    zeros = np.zeros(7)
+    plan = SimpleNamespace(t=[0.0, 1.0], q=[zeros, zeros], qd=[zeros, zeros])
+    motion = SimpleNamespace(q0=zeros, joined=plan, goals=[SimpleNamespace(pos=np.zeros(3))])
+    idle = {"position": zeros, "ee_pos": np.zeros(7), "velocity": zeros}
+    loaded = dict(idle, position=np.full(7, np.radians(2.5)), velocity=np.full(7, speed))
+    arm = Mock()
+    arm.get_state.side_effect = [idle, loaded]
+    arm.execute_joint_trajectory.return_value = SimpleNamespace(error_code=0)
+    monkeypatch.setattr(
+        planning, "time", SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda s: None)
+    )
+    planner = planning.Planner(arm, None, None)
+
+    if speed:
+        with pytest.raises(Refused, match="still moving"):
+            planner.run(motion, "swing", settle_for_release=True)
+    else:
+        assert planner.run(motion, "swing", settle_for_release=True)
+
+
+def test_release_only_wait_timeout_does_not_open_the_gripper(monkeypatch):
+    from unittest.mock import Mock
+
+    arm = Mock(get_state=lambda: {"velocity": [0.1]})
+    stamps = iter([0.0, 0.31])
+    monkeypatch.setattr(push_open, "time", SimpleNamespace(monotonic=lambda: next(stamps)))
+    with pytest.raises(Refused, match="no release or withdrawal"):
+        push_open._release(arm)
+    arm.gripper.assert_not_called()

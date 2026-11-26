@@ -486,3 +486,28 @@ to colour, and a calibrated camera tf (hand-eye) into `arm.frame`. It needs no G
 | ------------- | ---------------------------------------------------------------------------------- |
 | `fridge_real` | The module proper                                                                  |
 | `fridge_mock` | Same interface, no hardware — for developing against this module without owning it |
+
+### Open detection and motion diagnostics
+
+Door-plane fitting tries the next supported plane when the strongest candidate
+fails geometric checks. On the frozen Nov 16 frames this accepts 32 of 32
+views in both mask modes, up from 31, with the original 31 fits identical.
+The archived integration kitchen search tied at 35/36 guided and 27/36 raw.
+The shared detector skips the 0.5 s retry sleep after a terminal failed attempt.
+Earlier retries retain their original delay.
+
+`open_timing_enabled` defaults to false. Enable it to add stage diagnostics
+under `timing` to Open results and Open error payloads.
+`open_early_empty_view_switch` defaults to false. Enable it to end the first
+look after three consecutive synchronized empty SAM replies, allowing a
+configured alternative view to start sooner.
+
+A pull or release/withdrawal request refuses if the arm still exceeds
+0.02 rad/s at the settle deadline. The release guard applies no additional
+joint-position tolerance to a stationary loaded arm. The actual final joined
+Hook withdrawal, whether reused or replanned, must have at least 9° of joint
+limit clearance before dispatch.
+
+On ROS Humble, action-scoped subscriptions omit the automatic incompatible-QoS
+warning callback to avoid destruction races. Subscription QoS and matching
+remain the same.
