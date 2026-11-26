@@ -25,7 +25,6 @@ where it really is. Without drive_base the goal ends there, asking for the move 
 chair_moved then pushes (push_after_chair_move).
 """
 
-import time
 from dataclasses import replace
 
 import numpy as np
@@ -613,7 +612,6 @@ class PushOpen:
         with timing.span("reentry_plan"):
             say(f"  {after_release(self, planner, ai, door, reuse=reuse)}")
         planner.join(self.motion, FridgeModel(door).cabinet())
-        wait_until_still(ai)
         if not self.chair_move:
             ok = planner.run(self.motion, "off the handle + round the door + push-open", impedance=AFTER_RELEASE)
             say(f"PUSH-OPEN {'DONE' if ok else 'STOPPED SHORT'}")
@@ -647,20 +645,11 @@ class PushOpen:
 AFTER_RELEASE = {**F.PULL_GAINS, "path_tol": F.AFTER_RELEASE_PATH_TOL_RAD}  # everything after the release: compliant
 
 
-def wait_until_still(ai):
-    until = time.monotonic() + pl.SETTLE_S
-    while np.any(np.abs(ai.get_state().get("velocity", ())) > pl.SETTLE_SPEED_RAD_S):
-        if time.monotonic() >= until:
-            raise Refused("The arm is still moving after settling -- no release or withdrawal sent.")
-        time.sleep(0.02)
-
-
 @timing.timed("release")
 def _release(ai, *, early=False):
     """Open the gripper, slowly, the hand still (the swing has stopped at its angle). Refused if the gripper's own
     reported position (its joint state, not a camera) still says closed after the command: backing off then would drag
     the door."""
-    wait_until_still(ai)
     kwargs = {"open_threshold": 0.2} if early else {}
     opened = ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED, **kwargs)
     state = ai.gripper_state() if opened is not False and hasattr(ai, "gripper_state") else None

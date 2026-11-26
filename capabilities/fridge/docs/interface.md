@@ -502,10 +502,6 @@ under `timing` to Open results and Open error payloads.
 look after three consecutive synchronized empty SAM replies, allowing a
 configured alternative view to start sooner.
 
-A pull or release/withdrawal request refuses if the arm still exceeds
-0.02 rad/s at the settle deadline. The release guard applies no additional
-joint-position tolerance to a stationary loaded arm.
-
 On ROS Humble, action-scoped subscriptions omit the automatic incompatible-QoS
 warning callback to avoid destruction races. Subscription QoS and matching
 remain the same.
