@@ -504,9 +504,7 @@ configured alternative view to start sooner.
 
 A pull or release/withdrawal request refuses if the arm still exceeds
 0.02 rad/s at the settle deadline. The release guard applies no additional
-joint-position tolerance to a stationary loaded arm. The actual final joined
-Hook withdrawal, whether reused or replanned, must have at least 9° of joint
-limit clearance before dispatch.
+joint-position tolerance to a stationary loaded arm.
 
 On ROS Humble, action-scoped subscriptions omit the automatic incompatible-QoS
 warning callback to avoid destruction races. Subscription QoS and matching

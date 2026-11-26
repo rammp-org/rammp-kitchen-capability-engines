@@ -172,32 +172,6 @@ def test_retry_stationary_check_requires_full_world_validation(fridge):
         planner.preflight_start(obstacles, q, q, grasp_retry=True)
 
 
-@pytest.mark.parametrize("margin", [8.9, 9.0])
-def test_final_joined_hook_withdrawal_clearance(monkeypatch, margin):
-    from unittest.mock import Mock
-
-    joints = np.zeros((5, 7))
-    after = open_door.HookBackOff()
-    after.motion = SimpleNamespace(joined=None)
-    planner = Mock()
-    planner.join.side_effect = lambda motion, world: setattr(
-        motion, "joined", SimpleNamespace(q=joints)
-    )
-    planner.limit_margin.return_value = margin
-    monkeypatch.setattr(open_door, "load_door", lambda: {})
-    monkeypatch.setattr(open_door, "FridgeModel", Mock())
-    monkeypatch.setattr(push_open, "after_release", Mock(return_value="planned"))
-
-    if margin < open_door.HOOK_EXIT_LIMIT_MARGIN_DEG:
-        with pytest.raises(Refused, match="joint clearance"):
-            after.execute(Mock(get_state=lambda: {"velocity": [0.0]}), planner)
-        planner.run.assert_not_called()
-    else:
-        assert after.execute(Mock(get_state=lambda: {"velocity": [0.0]}), planner)
-        planner.run.assert_called_once()
-    assert planner.limit_margin.call_args.args[0] is joints
-
-
 @pytest.mark.parametrize("speed", [0.0, 0.1])
 def test_pull_release_uses_settle_speed_and_allows_loaded_offset(monkeypatch, speed):
     from unittest.mock import Mock

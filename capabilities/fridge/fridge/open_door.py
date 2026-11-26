@@ -1541,10 +1541,6 @@ class _AfterPull:
         say(f"  {P.after_release(self, planner, ai, door)}")
         planner.join(self.motion, FridgeModel(door).cabinet())
         P.wait_until_still(ai)
-        if isinstance(self, HookBackOff):
-            margin = planner.limit_margin(self.motion.joined.q)
-            if margin < HOOK_EXIT_LIMIT_MARGIN_DEG:
-                raise Refused(f"Hook withdrawal: only {margin:.1f}° of joint clearance -- arm untouched.")
         ok = planner.run(self.motion, self.title, impedance=P.AFTER_RELEASE)
         say(f"{self.title.upper()} {'DONE' if ok else 'STOPPED SHORT'}")
         return ok
