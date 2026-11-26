@@ -2356,6 +2356,33 @@ def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_tab
     assert not got.credible() and got.refusal()[0] == "never"  # nothing fed: nothing says the lid met the table
 
 
+def test_a_set_down_that_would_not_fly_in_the_execution_its_watch_rides_does_not_fly(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The set-down's watch rides the first motion leg of the execution it is put on: the lift's, where
+    the close flies on to the set-down as one, else the carry's. Every carry here is made to fly its touch
+    as an execution of its own (another chain): the lift and the carry planned ahead are not flown as one,
+    the lift flies alone; the carry after it does not fly, and the lid goes back on the box. No set-down
+    flies unwatched."""
+    real = rlo.plan_carry
+
+    def split(*a, **k):
+        carry, why = real(*a, **k)
+        if carry is not None:
+            carry.legs[-1].chain = carry.legs[-2].chain + 1
+        return carry, why
+
+    monkeypatch.setattr(rlo, "plan_carry", split)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY)
+    assert code == 1 and "place:touch" not in rec.events and "place:open" not in rec.events
+    after = rec.events[rec.events.index("grip:close") :]
+    assert after[:4] == [*CLOSE, "spot-look"]  # the lift alone, then the spot look
+    assert after[4:8] == ["lid:back-over", "lid:put-back", "lid:release", "lid:rise-off"] and after[-1] == "home"
+    out = capsys.readouterr().out
+    assert "the lift and the carry planned ahead would not fly as one execution" in out
+    assert "PUT BACK: the lid's way to the table would not fly as one execution" in out
+
+
 def test_every_press_is_cut_at_its_contact_and_watched_all_the_way_down(ctx, monkeypatch, tmp_path):
     """Contact detection rides each press's way in (its lead's stop_when). Review round 2: every
     press's stroke is cut where the pads meet the box (dp.PRESS_BY_FORCE: past it by nothing, the push
@@ -2859,6 +2886,96 @@ def test_a_retreat_from_where_the_arm_stands_that_ends_past_the_drift_gate_plans
     assert rec.events[-3:] == HOME
 
 
+def test_a_home_planned_ahead_flies_after_the_release_only_from_where_the_arm_stands_at_its_start(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The retreat from where the arm stood is said to end 0.02 rad from the one home was planned from,
+    within the gate; the arm then stands 0.05 rad off where it ends (a lag, a push), past the gate from
+    where the home planned ahead starts. That home is not flown (the runner would re-plan it with none
+    of home's own checks): home is planned at rest from where the arm stands, and flies from there."""
+    from box_opening.constants import DRIFT_REPLAN_RAD
+
+    real = rlo.retreat_from_live
+    after_retreat = []
+
+    def retreat(c, carry, world):
+        after_retreat.append(True)
+        return real(c, carry, world)[0], 0.02
+
+    monkeypatch.setattr(rlo, "retreat_from_live", retreat)
+    real_execute = ctx.client.execute
+
+    def execute(traj_, *a, **k):
+        out = real_execute(traj_, *a, **k)
+        if after_retreat == [True]:  # the release and the retreat's execution: the arm ends 0.05 rad off
+            after_retreat.append(False)
+            ctx.client.live[3] += 0.05
+        return out
+
+    monkeypatch.setattr(ctx.client, "execute", execute)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    assert code == 0 and rec.events[-3:] == HOME
+    (back,) = (r for r in rows if r["leg"] == "retreat_from_live")
+    assert (back["home_ahead"], back["home_flies"]) == (True, True)  # within the gate as the ends are compared
+    (after,) = (r for r in rows if r["leg"] == "retreat_from_live_after")  # ... and what happened
+    assert after["home_flies"] is False and rows.index(after) > rows.index(back)
+    (ahead,) = (r for r in rows if r["leg"] == "home_ahead")
+    assert ahead["flown"] is False and ahead["off_rad"] > DRIFT_REPLAN_RAD
+    homes = [at for name, at in rec.plans if name == "home"]
+    assert homes[-1] == rec.events.index("home")  # planned once more, at rest, after the retreat
+    start = rec.legs["home"].traj.points[0].positions
+    assert ctx.client.exec_starts[-1] == pytest.approx(start)  # from where the arm stood
+    assert start[3] == pytest.approx(rec.legs["place:retreat"].goal_joints[3] + 0.05)
+    assert "home is planned again from here" in capsys.readouterr().out
+
+
+def test_fingers_that_do_not_open_at_the_table_when_the_open_goes_out_blocking_stop_the_run_with_the_arm_let_go(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The open at the table cannot be sent under the retreat (no knuckle heard), so it goes out blocking
+    and fails: the same stop as an open that fails once joined. The arm lets go, exit 1: no retreat, no
+    home, and the run does not say DONE with the lid in the fingers."""
+    real = rlo.retreat_from_live
+
+    def at_release(c, carry, world):
+        held = c.client.gripper_cmd
+        c.client.gripper_send = lambda position: None
+        c.client.gripper_cmd = lambda position: held(position) if position is None else (False, AIR, False)
+        return real(c, carry, world)
+
+    monkeypatch.setattr(rlo, "retreat_from_live", at_release)
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert rec.runs[-1][0] == RELEASED and rec.runs[-1][1] == []  # the release's run sent no motion
+    assert "home" not in rec.events[rec.events.index("place:open") :]
+    assert ctx.client.lets_go == [len(ctx.client.executed)]  # let go once, after the last execution
+    assert "STOP: the fingers did not open at the table" in out and "DONE" not in out
+
+
+def test_a_retreat_the_run_refuses_at_the_table_is_not_taken_for_fingers_that_did_not_open(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """Only the open's own failure is fingers that did not open: a retreat from the lid the run refuses
+    before anything goes out is flown as it was before, its line from where the arm stands, then home."""
+    from box_opening.runtime.runner import Runner
+
+    real, refused = Runner._refusal, []
+
+    def refusal(self, leg):
+        if leg.name == "place:retreat" and not refused:
+            refused.append(leg)
+            return "the arm is 0.06 rad from the start"
+        return real(self, leg)
+
+    monkeypatch.setattr(Runner, "_refusal", refusal)
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    out = capsys.readouterr().out
+    assert len(refused) == 1 and "STOP: the fingers did not open at the table" not in out
+    assert rec.events[-2:] == ["place:retreat", "home"]  # its line from where the arm stands flown, then home
+    assert ctx.client.lets_go == []
+
+
 def test_a_press_only_run_chooses_no_lid_spot(ctx, monkeypatch, tmp_path, capsys):
     code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4)], extent=SMALL, press_only=True)
     assert code == 0 and ctx.lid_drop is None and not [r for r in rows if r["leg"] == "lid_spot"]
@@ -3174,6 +3291,186 @@ def test_a_carry_the_run_refuses_before_it_starts_puts_the_lid_back(ctx, monkeyp
     after = rec.events[rec.events.index("place:touch") + 1 :]  # after the carry's legs, refused as one
     assert after[:4] == ["lid:back-over", "lid:put-back", "lid:release", "lid:rise-off"] and after[-1] == "home"
     assert "PUT BACK: the lid's way to the table was refused before it started" in capsys.readouterr().out
+
+
+def _carry_ends(ctx, monkeypatch, progress, message="goal rejected by the driver", moved=0.0):
+    """The carry after the spot look (the first goal sent after it) ends "failed" at `progress` with the
+    client's `message`, as for a goal the driver rejected (0.0: nothing went out) or one it stopped part
+    way. The arm stays where it stood, or `moved` rad (joint 4) off it."""
+    looked, real = [], ctx.client.execute
+
+    def execute(traj_, *a, **k):
+        if looked == [True]:
+            looked.append(False)
+            ctx.client.live[3] += moved
+            return "failed", {"message": message, "progress": progress, "torque_peak": 0.0}
+        return real(traj_, *a, **k)
+
+    monkeypatch.setattr(ctx.client, "execute", execute)
+    return lambda: looked.append(True)
+
+
+def test_a_carry_the_driver_rejects_before_it_starts_puts_the_lid_back(ctx, monkeypatch, tmp_path, capsys):
+    """Not started is not started, whatever the word for it: a carry the driver rejected (failed, no
+    progress) left the arm standing at the clear holding the lid, which goes back on the box, as a carry
+    the run's own checks refused does."""
+    code, rec, _chain, _rows = _full_flow(
+        ctx,
+        monkeypatch,
+        tmp_path,
+        [(BUTTON, 0.4), (UP, 9.0)],
+        extent=ROOMY,
+        one_motion=False,
+        at_spot_look=_carry_ends(ctx, monkeypatch, 0.0),
+    )
+    assert code == 1 and "place:open" not in rec.events
+    after = rec.events[rec.events.index("place:touch") + 1 :]
+    assert after[:4] == ["lid:back-over", "lid:put-back", "lid:release", "lid:rise-off"] and after[-1] == "home"
+    assert "PUT BACK: the lid's way to the table was refused before it started" in capsys.readouterr().out
+    assert ctx.client.lets_go == []  # nothing stopped part way
+
+
+@pytest.mark.parametrize(
+    "message, moved",
+    [
+        ("stop_when: the driver did not confirm the stop — check the arm", 0.0),
+        ("execution watchdog timeout (240 s)", 0.0),
+        ("no result", 0.0),
+        ("goal rejected by the driver", 0.05),
+    ],
+    ids=["a stop not confirmed", "the watchdog", "no result", "rejected, the arm off the carry's start"],
+)
+def test_a_carry_that_failed_with_no_progress_but_may_have_moved_stops_the_run_and_flies_nothing_more(
+    ctx, monkeypatch, tmp_path, capsys, message, moved
+):
+    """No progress is not proof that nothing moved: a goal the driver took and then lost word of (a stop it
+    did not confirm, the watchdog, no result), or the arm standing off where the carry starts, may be an arm
+    still moving. No line is sent from joints read then: the run stops as it did before, the arm holding the
+    lid."""
+    code, rec, _chain, _rows = _full_flow(
+        ctx,
+        monkeypatch,
+        tmp_path,
+        [(BUTTON, 0.4), (UP, 9.0)],
+        extent=ROOMY,
+        one_motion=False,
+        at_spot_look=_carry_ends(ctx, monkeypatch, 0.0, message, moved),
+    )
+    assert code == 1 and rec.events[-1] == "place:touch"  # nothing after the carry's legs
+    out = capsys.readouterr().out
+    assert "STOP: the lid's way to the table did not start during" in out and "PUT BACK" not in out
+
+
+def test_the_client_starts_every_failure_before_the_driver_takes_a_goal_and_none_after_with_not_taken():
+    """The carry's put-back reads the client's words (client.NOT_TAKEN) for a goal the driver never took:
+    each "failed" the client gives before the driver accepts a goal starts with one of them, and none it gives
+    after does, so a rewording cannot send lines to an arm that may be moving."""
+    import inspect
+    import re
+
+    from box_opening.runtime import client
+
+    src = inspect.getsource(client.PlannerClient.execute)
+    before, after = src.split("send.get_result_async()", 1)
+    said = re.compile(r'info\["message"\] = \(?\s*"([^"]*)"')
+    assert len(said.findall(before)) == 6 and all(m.startswith(client.NOT_TAKEN) for m in said.findall(before))
+    assert said.findall(after) and not any(m.startswith(client.NOT_TAKEN) for m in said.findall(after))
+
+
+def test_a_carry_the_driver_stops_part_way_still_stops_the_run_with_the_arm_let_go(ctx, monkeypatch, tmp_path, capsys):
+    code, rec, _chain, _rows = _full_flow(
+        ctx,
+        monkeypatch,
+        tmp_path,
+        [(BUTTON, 0.4), (UP, 9.0)],
+        extent=ROOMY,
+        one_motion=False,
+        at_spot_look=_carry_ends(ctx, monkeypatch, 0.4),
+    )
+    assert code == 1 and rec.events[-1] == "place:touch"  # nothing after the carry's legs
+    assert len(ctx.client.lets_go) == 1
+    out = capsys.readouterr().out
+    assert "STOP: the lid's way to the table stopped during" in out and "PUT BACK" not in out
+
+
+@pytest.mark.parametrize(
+    "error, put_back",
+    [(ValueError("no cells"), True), (KeyboardInterrupt(), False), (rlo.abort.LookaheadAborted("a Ctrl+C"), False)],
+    ids=["an error", "a Ctrl+C", "a Ctrl+C while it planned"],
+)
+def test_an_error_while_the_spot_is_chosen_after_the_lift_puts_the_lid_back_on_the_box(
+    ctx, monkeypatch, tmp_path, capsys, error, put_back
+):
+    """Anything that goes wrong while the spot is chosen with the lid in the fingers and the arm standing
+    (here the search of the map) is no spot: the lid goes back on the box, as where none is found, not
+    held in the air while the run ends on a traceback. A Ctrl+C there ends the run as ever."""
+
+    def broken(*a, **k):
+        raise error
+
+    monkeypatch.setattr(rlo.SpotSearch, "pick", broken)
+    flow = (ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    if not put_back:
+        with pytest.raises(KeyboardInterrupt):
+            _full_flow(*flow, extent=ROOMY, one_motion=False)
+        assert "PUT BACK" not in capsys.readouterr().out
+        return
+    code, rec, _chain, rows = _full_flow(*flow, extent=ROOMY, one_motion=False)
+    assert code == 1 and "lid:carry" not in rec.events
+    after = rec.events[rec.events.index("spot-look") + 1 :]
+    assert after[:4] == ["lid:back-over", "lid:put-back", "lid:release", "lid:rise-off"] and after[-1] == "home"
+    (failed,) = (r for r in rows if r["leg"] == "lid_spot_failed")
+    assert failed["why"] == "choosing the lid's spot failed (ValueError: no cells)"
+    assert "PUT BACK: choosing the lid's spot failed (ValueError: no cells)" in capsys.readouterr().out
+
+
+def test_an_error_while_the_next_spot_is_chosen_puts_the_lid_back_on_the_box(ctx, monkeypatch, tmp_path, capsys):
+    """The same after a set-down that felt no table, once the lid is back up over the spot it left."""
+    real = rlo.SpotSearch.pick
+
+    def pick(self, runner, q, **kw):
+        if self.left:
+            raise ValueError("no reach")
+        return real(self, runner, q, **kw)
+
+    monkeypatch.setattr(rlo.SpotSearch, "pick", pick)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    assert code == 1 and len(rec.setdowns) == 1
+    after = rec.events[rec.events.index("place:touch") + 1 :]
+    assert after[:5] == ["lid:back-up", "lid:back-over", "lid:put-back", "lid:release", "lid:rise-off"]
+    assert after[-1] == "home"
+    (failed,) = (r for r in rows if r["leg"] == "lid_spot_failed")
+    assert failed["why"] == "choosing the next spot failed (ValueError: no reach)"
+    assert "PUT BACK: choosing the next spot failed (ValueError: no reach)" in capsys.readouterr().out
+
+
+def test_an_error_raised_by_the_carrys_own_flight_is_not_taken_for_no_spot(ctx, monkeypatch, tmp_path, capsys):
+    """Only the choice of the spot is fenced: an error the carry's flight raises (the arm may be anywhere
+    along it) goes on to the run's own handler as it did before, never to a put-back planned from there."""
+    looked, real = [], ctx.client.execute
+
+    def execute(traj_, *a, **k):
+        if looked == [True]:
+            looked.append(False)
+            raise RuntimeError("the driver's action server went away")
+        return real(traj_, *a, **k)
+
+    monkeypatch.setattr(ctx.client, "execute", execute)
+    with pytest.raises(RuntimeError, match="went away"):
+        _full_flow(
+            ctx,
+            monkeypatch,
+            tmp_path,
+            [(BUTTON, 0.4), (UP, 9.0)],
+            extent=ROOMY,
+            one_motion=False,
+            at_spot_look=lambda: looked.append(True),
+        )
+    assert looked == [True, False]  # raised by the carry, the first goal after the spot look
+    out = capsys.readouterr().out
+    assert "PUT BACK" not in out and "choosing the lid's spot failed" not in out
 
 
 def test_the_spot_look_takes_the_first_frame_shot_once_the_arm_stands_still(monkeypatch):
@@ -4515,6 +4812,120 @@ def test_a_look_pose_grip_cut_with_no_lift_off_the_box_backs_out_from_where_the_
     settled = sent[a + 1][3]
     assert sent[a + 2][2] == pytest.approx(settled) and sent[a + 2][2] != pytest.approx(sent[a][3])
     assert rec.legs["grip:up"].traj.points[0].positions == pytest.approx(settled)
+
+
+def _pushed_at_the_close(ctx, monkeypatch, by=0.05):
+    """The arm stands `by` rad (joint 4) off where the way down was planned to end as the first close
+    goes out: a way down that stopped short with no contact felt, or the close pulling the hand. Returns
+    the joints it stands at then."""
+    from box_opening.runtime.runner import Runner
+
+    real, at = Runner.wait_still, []
+
+    def wait_still(self, before):
+        if before == "grip:close" and not at:
+            ctx.client.live[3] += by
+            at.append(list(ctx.client.live))
+        return real(self, before)
+
+    monkeypatch.setattr(Runner, "wait_still", wait_still)
+    return at
+
+
+def test_a_lift_planned_ahead_that_no_longer_starts_where_the_arm_stands_after_the_close_is_planned_from_there(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The watched way down met nothing, and the arm stands 0.05 rad from its planned end after the close:
+    the lift planned ahead from that end is refused by the runner's drift gate. The knob held, the lift is
+    planned from where the arm stands, as after a contact, and flies alone; the spot is looked for after it,
+    and the run goes on to the set-down and home."""
+    at = _pushed_at_the_close(ctx, monkeypatch)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    assert code == 0
+    closed = rec.events.index("grip:close")
+    assert rec.events[closed:] == [*CLOSE, *CARRY, "lid:lift", "lid:clear", "spot-look", *CARRY, *HOME]
+    assert rec.legs["lid:lift"].traj.points[0].positions == pytest.approx(at[0])  # from where the arm stands
+    assert rec.events.count("grip:close") == 1  # closed once: the knob still held
+    assert [r["ok"] for r in rows if r["leg"] == "reach_grip_result"] == [True]
+    assert "the lift does not start where the arm stands after the close" in capsys.readouterr().out
+
+
+def _lift_after_the_push(ctx, monkeypatch, at, then):
+    """plan_lift once the arm was pushed at the close (`at`, _pushed_at_the_close): `then(real)` gives what
+    it returns. Returns the calls made after the push."""
+    real, calls = rlo.plan_lift, []
+
+    def plan_lift(*a):
+        if not at:
+            return real(*a)
+        calls.append(a[2])
+        assert len(calls) <= 2, "the lift planned from where the arm stands over and over"
+        return then(lambda: real(*a))
+
+    monkeypatch.setattr(rlo, "plan_lift", plan_lift)
+    return calls
+
+
+def test_a_lift_that_does_not_plan_from_where_the_arm_stands_after_the_close_opens_the_fingers_and_backs_out(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The knob is in the fingers when the lift planned from where the arm stands after the close does not
+    plan: the fingers open on it before the hand backs out, never dragging the lid off the box by its knob
+    along the way down's line."""
+    at = _pushed_at_the_close(ctx, monkeypatch)
+    calls = _lift_after_the_push(ctx, monkeypatch, at, lambda real: (None, "no lift from here"))
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    assert code == 1 and len(calls) == 1
+    after = rec.events[rec.events.index("grip:close") + 1 :]
+    assert "grip:open" in after and after[-1] == "home"  # opened, then backed out
+    assert "lid:lift" not in after[after.index("grip:open") :]
+    assert "the lid has no way off the box (no lift from here)" in capsys.readouterr().out
+
+
+def test_a_lift_planned_from_where_the_arm_stands_that_is_refused_again_backs_out_once(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """Planned from where the arm stands after the close once, not over and over: refused again (the arm
+    moved once more before it flew), the lift did not start, the fingers open and the hand backs out."""
+    at = _pushed_at_the_close(ctx, monkeypatch)
+
+    def moved_again(real):
+        got = real()
+        ctx.client.live[3] += 0.05  # after the plan, before the flight
+        return got
+
+    calls = _lift_after_the_push(ctx, monkeypatch, at, moved_again)
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    assert code == 1 and len(calls) == 1
+    after = rec.events[rec.events.index("grip:close") + 1 :]
+    assert "grip:open" in after and after[-1] == "home"  # opened, then backed out
+    assert "lid:lift" not in after[after.index("grip:open") :]
+    out = capsys.readouterr().out
+    assert out.count("the lift does not start where the arm stands after the close") == 1
+    assert "the lift did not start" in out
+
+
+@pytest.mark.parametrize("by", [0.05, 0.03], ids=["past the drift gate", "within it"])
+def test_a_close_on_air_backs_out_from_where_the_arm_stands_only_where_it_stands_off_the_planned_end(
+    ctx, monkeypatch, tmp_path, by
+):
+    """The arm 0.05 rad off where the way down was planned to end, the close on air: the way back up is
+    solved from where the arm stands, not built from the planned end (which the runner's drift gate would
+    refuse, the hand left at the knob). Within the gate, the way back planned from that end, as before."""
+    from box_opening.constants import DRIFT_REPLAN_RAD
+
+    at = _pushed_at_the_close(ctx, monkeypatch, by)
+    real, backs = rlo._grip_backwards, []
+    monkeypatch.setattr(rlo, "_grip_backwards", lambda *a: backs.append((a[-1], real(*a))) or backs[-1][1])
+    aims = [(BUTTON, 0.4), (UP, 9.0), (REGRIP, 9.0)]
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims, knuckle=[AIR, KNOB_ON])
+    assert code == 0  # backed out, aimed again, gripped, and the lid set down
+    q, legs = backs[0]  # the first close's way back
+    if by > DRIFT_REPLAN_RAD:
+        assert q == pytest.approx(at[0]) and legs[0].traj.points[0].positions == pytest.approx(at[0])
+    else:
+        assert q is None  # from the planned end: the runner flies it from within its gate
+    assert [(r["attempt"], r["ok"]) for r in rows if r["leg"] == "reach_grip_result"] == [(1, False), (2, True)]
 
 
 def test_a_ctrl_c_at_the_rest_before_the_watched_way_down_flies_no_way_down(ctx, monkeypatch, tmp_path):

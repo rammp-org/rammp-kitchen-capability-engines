@@ -3274,6 +3274,15 @@ def watch_setdown(ctx, legs, carry):
     return carry.contact
 
 
+def _one_execution(legs):
+    """Whether the motion legs of `legs` fly as one execution, as the runner groups them (merge_groups): the
+    set-down's watch rides the first motion leg's (watch_setdown), and sees the touch only where it is in
+    that execution."""
+    from box_opening.runtime.legs import Kind
+
+    return sum(g[0].kind is Kind.MOTION for g in merge_groups(legs)) == 1
+
+
 # The carry the planner refuses for where it starts or ends, inside its limit
 # margin (PLANNER_LIMIT_MARGIN_RAD), flies as the arm's own walk instead
 # (walk_carry): to the same hover at the same attitude, every step solved
@@ -4672,9 +4681,19 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
             # planned from the way down's end, which the hand stands above: the close plans the lift from
             # where it is (_close_and_carry), and the way back is solved from there (_grip_backwards)
             met, ahead = True, None
+    q_end = [float(v) for v in way.stroke.legs[-1][1][-1]]  # where the way down is planned to end
+
+    def live():
+        # a way back is solved from where the arm stands where it does not stand where the way down was planned
+        # to end: a contact stopped it above that, or the arm stands past the runner's drift gate from there
+        # (after the close too), which would refuse the way back planned from there
+        from box_opening.geometry import ang_diff
+
+        q = ctx.client.joints()
+        return met or max(abs(ang_diff(a, b)) for a, b in zip(q, q_end, strict=False)) > DRIFT_REPLAN_RAD
 
     def back_out(why, opened=True):
-        return _back_out(ctx, cfg, runner, way, why, opened=opened, live=met)
+        return _back_out(ctx, cfg, runner, way, why, opened=opened, live=live())
 
     def miss(detail, air, empty=False):
         retry = air and attempt < GRIP_TRIES and yaw is not None
@@ -4691,7 +4710,7 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
                 % (detail, 1000 * GRIP_RETRY_LOWER_M),
             )
             regrip, code = _regrip(
-                ctx, cfg, runner, eyes, way, button, yaw, detail, opened=not empty, seen=seen, live=met
+                ctx, cfg, runner, eyes, way, button, yaw, detail, opened=not empty, seen=seen, live=live()
             )
             if regrip is None:
                 return code
@@ -4722,13 +4741,13 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
             "the grip failed%s (%s) — the lid is not taken off"
             % (" twice, the second time %.0f mm lower" % (1000 * GRIP_RETRY_LOWER_M) if attempt > 1 else "", detail),
             opened=not empty,
-            live=met,
+            live=live(),
         )
 
     return _close_and_carry(ctx, cfg, runner, eyes, ahead, way.stroke.quat, attempt, room, back_out, miss)
 
 
-def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_out, miss):
+def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_out, miss, closed=False):
     """The hand down round the knob, the fingers open, the hand at `quat`:
     the close, judged by the grip band, then the lift, the clear, the carry
     and the set-down — ONE execution, all planned while the hand came down
@@ -4737,13 +4756,18 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
     the spot look there (choose_and_carry). `back_out(why, opened=True)`: the
     hand's way off the knob, nothing lifted — no lift to fly, or one that
     did not start; `miss(detail, on_air)`: a close that did not hold. Each
-    returns what this does: the exit code, or its caller's sentinel."""
+    returns what this does: the exit code, or its caller's sentinel. A lift
+    the runner refuses after the close, the arm standing past its drift gate
+    from where the lift was planned from (the close pulled the hand, or the
+    way down stopped short of its planned end with no contact felt): once
+    more with `closed`, the knob held, the lift planned from where the arm
+    stands, as after a contact."""
     world = _full_world(ctx)
     lift, why, placed = ahead if ahead is not None else (None, "the lookahead plan failed", None)
     if lift is None:
         lift, why = plan_lift(ctx, cfg, ctx.client.joints(), quat)
     if lift is None:
-        return back_out("the lid has no way off the box (%s) — not gripping it" % why, opened=False)
+        return back_out("the lid has no way off the box (%s) — not gripping it" % why, opened=closed)
     # closed once the arm stands still: the hand where it came down to, not
     # where it is settling past (Leg.send_when_still)
     close = _gripper_leg(
@@ -4771,9 +4795,17 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
                 "look" % gate
             )
             one = False
+        elif not _one_execution([*lift.legs, *placed.carry.legs]):
+            # the set-down's watch rides the lift's execution: a carry that would fly as another would set
+            # the lid down unwatched
+            log.info(
+                "[press_demo] the lift and the carry planned ahead would not fly as one execution, which the "
+                "set-down's watch rides: the lift alone, then the spot look"
+            )
+            one = False
     gate = runner.refusal(lift.legs)
     if gate is not None:
-        return back_out("the lid has no way off the box (%s: %s) — not gripping it" % gate, opened=False)
+        return back_out("the lid has no way off the box (%s: %s) — not gripping it" % gate, opened=closed)
     carried = None
     search = None
     ctx.lid_lifted = lift  # the lid's way back onto the box, for a STOP before the carry (put_lid_back)
@@ -4841,15 +4873,21 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
                 "the lift alone, then the spot look"
                 % ("; ".join(placed.refused) or (placed.passed.says() if placed.passed else "no spot the hand reaches"))
             )
-        flying = [close, *lift.legs]
+        flying = list(lift.legs) if closed else [close, *lift.legs]  # (closed: the knob is held already)
         log.info(
-            "[press_demo] CLOSE, then ONE MOTION: %s — %.0f mm straight up, then %.0f mm back toward the arm"
-            % (", ".join(lg.name for lg in lift.legs), 1000 * _lift_m(ctx, lift), 1000 * lift.back_m)
+            "[press_demo] %sONE MOTION: %s — %.0f mm straight up, then %.0f mm back toward the arm"
+            % (
+                "" if closed else "CLOSE, then ",
+                ", ".join(lg.name for lg in lift.legs),
+                1000 * _lift_m(ctx, lift),
+                1000 * lift.back_m,
+            )
         )
         # while the lift and the clear fly, the carry to the scene camera's
         # best spot from where the clear ends (carry_ahead): flown after the
         # lift where the spot chosen there is the same
-        _video(ctx, "CLOSE on the knob, then LIFT %.0f mm and CLEAR the box" % (1000 * _lift_m(ctx, lift)))
+        then = "" if closed else "CLOSE on the knob, then "
+        _video(ctx, "%sLIFT %.0f mm and CLEAR the box" % (then, 1000 * _lift_m(ctx, lift)))
         res = runner.run(flying, execute=True, lookahead=lambda end: carry_ahead(ctx, cfg, eyes, end, room=room))
         carried = _lookahead(runner)
     grip = [r for r in res if r.leg_name in ("grip:open", "grip:close")]
@@ -4860,14 +4898,24 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
             bool(grip) and grip[-1].ok and grip[-1].leg_name == "grip:close",
             grip[-1].detail if grip else None,
         )
-    if not grip or not grip[-1].ok or grip[-1].leg_name != "grip:close":
+    # (closed: the knob was gripped in the run before this one, and said so there)
+    if not closed and (not grip or not grip[-1].ok or grip[-1].leg_name != "grip:close"):
         detail = grip[-1].detail if grip else res[-1].detail
         return miss(detail, bool(grip) and _on_air(grip[-1], cfg.grip_band), bool(grip) and _close_reached(grip[-1]))
-    runner.note("reach_grip_result", ok=True, detail=grip[-1].detail, attempt=attempt)
-    log.info("[press_demo] LID GRIPPED — %s" % grip[-1].detail)
+    if not closed:
+        runner.note("reach_grip_result", ok=True, detail=grip[-1].detail, attempt=attempt)
+        log.info("[press_demo] LID GRIPPED — %s" % grip[-1].detail)
     moves = [r for r in res if r.leg_name not in ("grip:open", "grip:close")]
     last = moves[-1] if moves else res[-1]
     if not moves or not all(r.ok for r in moves):
+        if not closed and len(moves) == 1 and last.outcome == "refused":
+            # the runner refused the plan-free lift planned ahead (its drift gate): the arm stands past it from
+            # where that was planned from, after the close. Planned from where it stands, as after a contact
+            log.info(
+                "[press_demo] the lift does not start where the arm stands after the close (%s): it is planned from "
+                "there, then the spot look" % (last.detail or last.outcome)
+            )
+            return _close_and_carry(ctx, cfg, runner, eyes, None, quat, attempt, room, back_out, miss, closed=True)
         if len(moves) <= 1 and not _started(last):
             # nothing moved: the knob in the fingers, the lid still on the canister
             return back_out(
@@ -5823,7 +5871,32 @@ class SpotSearch:
         return True
 
 
+def _spot_fenced(runner, choose, where):
+    """`choose()`, the choice of a spot and the planning of its carry with the lid in the fingers and the
+    arm standing (it flies nothing), fenced: what it raises is noted ('lid_spot_failed') and taken for
+    no spot, the words returned (str) for the lid to go back on the box (put_lid_back), as where none
+    is found. A Ctrl+C that came while it planned (abort.LookaheadAborted) ends the run as a Ctrl+C
+    does; a Ctrl+C itself and the arm's own halt (BaseExceptions) pass as they are."""
+    try:
+        return choose()
+    except abort.LookaheadAborted as e:
+        raise KeyboardInterrupt(str(e)) from e
+    except Exception as e:  # noqa: BLE001 -- the lid in the fingers over the table: back on the box, not held there
+        why = "%s failed (%s: %s)" % (where, type(e).__name__, e)
+        runner.note("lid_spot_failed", why=why)
+        return why
+
+
 def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
+    """_choose_spot fenced (_spot_fenced), then the carry and set-down it chose flown (_fly_carry),
+    or the lid back on the box where it chose none (put_lid_back). Returns the exit code."""
+    got = _spot_fenced(runner, lambda: _choose_spot(ctx, cfg, runner, eyes, ahead), "choosing the lid's spot")
+    if isinstance(got, str):
+        return put_lid_back(ctx, cfg, runner, got)
+    return _fly_carry(ctx, cfg, runner, *got)
+
+
+def _choose_spot(ctx, cfg, runner, eyes, ahead=None):
     """The lid lifted and clear of the box, in the fingers: its one stop.
     The wrist's frame (spot_look) and the scene camera's table make the map
     (spot_map) the spot is chosen on; the first of spot_candidates the carry plans to
@@ -5837,8 +5910,9 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
     knuckle read (the lid slipped?); the release and the retreat, home
     planned while that flies (_release_and_home); home. The
     lid_spot note says how long each part took here, and whether the carry
-    planned ahead flew (_ahead_note). Returns the exit code: 0 with the lid
-    set down and the arm home."""
+    planned ahead flew (_ahead_note). Flies nothing: returns what
+    choose_and_carry flies (_fly_carry's carry, drop, tier and search), or
+    why no spot was chosen (str: the lid goes back on the box)."""
     from box_opening.geometry import ang_diff
     from box_opening.tasks import press_demo as pd
 
@@ -5916,12 +5990,9 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
                 "to the box after it (%.0f s are left, they take %.0f)"
                 % (max(search.clock.left_s() or 0.0, 0.0), SPOT_S + BOX_S + END_S)
             )
-        return put_lid_back(
-            ctx,
-            cfg,
-            runner,
-            "no carry plans to a spot on the table the cameras measured (%s)%s"
-            % ("; ".join(refused) or passed.says(), ended),
+        return "no carry plans to a spot on the table the cameras measured (%s)%s" % (
+            "; ".join(refused) or passed.says(),
+            ended,
         )
     drop, tier, says = chosen
     _say_spot(ctx, eyes, chosen, refused, search.tmap, table_z)
@@ -5938,7 +6009,7 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
             _touch_says(carry, search.after_this()),
         )
     )
-    return _fly_carry(ctx, cfg, runner, carry, drop, tier, search)
+    return carry, drop, tier, search
 
 
 def _fly_carry(ctx, cfg, runner, carry, drop, tier, search):
@@ -5946,6 +6017,14 @@ def _fly_carry(ctx, cfg, runner, carry, drop, tier, search):
     the arm stands with the lid — after the lift (choose_and_carry) or over a spot it left
     (another_spot) — then what the watch felt decides (_release_and_home: the release and home, or
     on to another spot with `search`). Returns the exit code."""
+    if not _one_execution(carry.legs):
+        # the watch would ride the carry's execution, not the set-down's: none flies unwatched
+        return put_lid_back(
+            ctx,
+            cfg,
+            runner,
+            "the lid's way to the table would not fly as one execution, and its set-down could not be watched",
+        )
     watch_setdown(ctx, carry.legs, carry)  # where the lid meets the table, watched
     # No lookahead on this execution, as on the press's own (reach_press.fly_way_in). The client runs what a
     # goal hosts once the goal is accepted and only then starts to poll its stop_when (client.execute): home
@@ -5961,10 +6040,10 @@ def _fly_carry(ctx, cfg, runner, carry, drop, tier, search):
     if len(res) == 1 and last.flown_traj is not None:
         rp._note_flight(runner, "reach_carry_flight", [lg.name for lg in merge_groups(carry.legs)[0]], last)
     if not all(r.ok for r in res):
-        if len(res) == 1 and not _started(last) and last.outcome == "refused":
-            # the run's own checks refused it before anything went out (the driver never saw
-            # it): the arm stands where the clear left it, holding the lid, which goes back on
-            # the box the way it came off
+        if len(res) == 1 and not _started(last) and _never_taken(ctx, carry, last):
+            # refused before anything went out, by the run's own checks or by the driver: the arm
+            # stands where the clear left it, holding the lid, which goes back on the box the way
+            # it came off
             return put_lid_back(
                 ctx,
                 cfg,
@@ -5983,6 +6062,22 @@ def _fly_carry(ctx, cfg, runner, carry, drop, tier, search):
             rp.let_go(ctx)
         return 1
     return _release_and_home(ctx, cfg, runner, carry, drop, tier, None, None, search=search)
+
+
+def _never_taken(ctx, carry, last):
+    """Whether the carry `last` ended (one execution, no progress) never went to the arm: the run's own
+    checks refused it, or the client gave it up before the driver took it (client.NOT_TAKEN: not sent,
+    or rejected by the driver), the arm standing where the carry starts by the runner's own measure
+    (driver.start_gap_rad within DRIFT_REPLAN_RAD). A goal the driver took and then lost word of (a stop
+    it did not confirm, the watchdog, no result) is not: the arm may be moving."""
+    if last.outcome == "refused":
+        return True
+    from box_opening.runtime.client import NOT_TAKEN
+    from box_opening.runtime.driver import start_gap_rad
+
+    if last.outcome != "failed" or not str(last.detail or "").startswith(NOT_TAKEN):
+        return False
+    return start_gap_rad(ctx.client.joints(), carry.legs[0].traj) <= DRIFT_REPLAN_RAD
 
 
 def _say_spot(ctx, eyes, chosen, refused, tmap, table_z):
@@ -6277,6 +6372,17 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused, above_m=N
     code = _back_up(ctx, runner, carry, why, _full_world(ctx))
     if code is not None:
         return code
+    got = _spot_fenced(runner, lambda: _next_spot(ctx, runner, search, verdict, was), "choosing the next spot")
+    if isinstance(got, str):
+        return put_lid_back(ctx, cfg, runner, got)
+    return _fly_carry(ctx, cfg, runner, *got, search)
+
+
+def _next_spot(ctx, runner, search, verdict, was):
+    """another_spot's choice of the next spot, with the lid in the fingers over the spot `was` it left
+    (`verdict`: what its set-down felt) and the arm standing. Flies nothing: returns the carry, the
+    spot and its tier for _fly_carry, or why no other spot is tried (str: the lid goes back on the
+    box)."""
     runner.wait_still("the next spot for the lid")
     q = [float(v) for v in ctx.client.joints()]
     t0 = time.monotonic()
@@ -6320,31 +6426,20 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused, above_m=N
         looked_again=looked or got.looked,
     )
     if got.carry is None and got.timed_out:
-        return put_lid_back(
-            ctx,
-            cfg,
-            runner,
-            "no table was felt under the lid (%s), and no other spot is tried: the run's time %s"
-            % (
-                tried,
-                "cannot be read"
-                if left_s is None
-                else "ran out while one was looked for (%.0f s are left; a spot and the way back to the box after "
-                "it take %.0f)" % (max(left_s, 0.0), SPOT_S + BOX_S + END_S),
-            ),
+        return "no table was felt under the lid (%s), and no other spot is tried: the run's time %s" % (
+            tried,
+            "cannot be read"
+            if left_s is None
+            else "ran out while one was looked for (%.0f s are left; a spot and the way back to the box after "
+            "it take %.0f)" % (max(left_s, 0.0), SPOT_S + BOX_S + END_S),
         )
     if got.carry is None:
-        return put_lid_back(
-            ctx,
-            cfg,
-            runner,
+        return (
             "no table was felt under the lid (%s), and no other spot on the table the cameras measured has a "
-            "carry that plans (%s)" % (tried, "; ".join(got.refused) or got.passed.says()),
+            "carry that plans (%s)" % (tried, "; ".join(got.refused) or got.passed.says())
         )
     if stop is not None:
-        return put_lid_back(
-            ctx, cfg, runner, "no table was felt under the lid (%s), and no other spot is tried: %s" % (tried, stop)
-        )
+        return "no table was felt under the lid (%s), and no other spot is tried: %s" % (tried, stop)
     search.spots += 1
     nxt, tier2, says = chosen
     _say_spot(
@@ -6370,7 +6465,7 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused, above_m=N
             _touch_says(got.carry, search.after_this()),
         )
     )
-    return _fly_carry(ctx, cfg, runner, got.carry, nxt, tier2, search)
+    return got.carry, nxt, tier2
 
 
 # The retreat back up from the lid on the table flies from where the arm
@@ -6539,6 +6634,7 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why, search=Non
         else [dp.compliant_line(ctx, "place:retreat", carry.retreat, carry.quat, rp.free_line_speed(ctx), world)]
     )
     up, home_legs = retreat[:1], retreat[1:]
+    said_flies = False  # the retreat_from_live row said the home planned ahead flies
     live_up, off = retreat_from_live(ctx, carry, world)
     if live_up is None:
         log.info("[press_demo] no retreat solves from where the arm stands (%s): the one planned flies" % off)
@@ -6554,8 +6650,9 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why, search=Non
             end_off_rad=round(off, 4),
             hold_s=RETREAT_HOLD_S,
             home_ahead=ahead,  # a home was planned ahead ...
-            home_flies=bool(home_legs),  # ... and flies from where this retreat ends
+            home_flies=bool(home_legs),  # ... and flies from where this retreat is planned to end
         )
+        said_flies = bool(home_legs)
     log.info(
         "[press_demo] RELEASE as the retreat starts (%s), then HOME, slow, in MEDIUM impedance%s"
         % (", ".join(lg.name for lg in up), ": %s" % ", ".join(lg.name for lg in home_legs) if home_legs else "")
@@ -6569,6 +6666,9 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why, search=Non
     res = runner.run([release, *up], execute=True, lookahead=host)
     home_ahead = None if host is None else runner.lookahead_result
     opened = runner.join_pending()
+    if opened is None and res and res[-1].leg_name == release.name and not res[-1].ok:
+        # the open went out blocking (its send under the retreat failed) and failed: no retreat flew
+        opened = res[-1]
     if opened is not None and not opened.ok:
         log.info("[press_demo] STOP: the fingers did not open at the table (%s) — the arm holds" % opened.detail)
         rp.let_go(ctx)  # the spring pressing the lid onto the table, or holding it over
@@ -6593,6 +6693,15 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why, search=Non
                 rp.let_go_part_way(ctx, res)
                 return 1
         home_legs, home_ahead = [], None  # planned from where the arm stands now
+    if home_legs:
+        # flown as planned only where the arm stands where they start, as every home planned ahead
+        # (reach_press._planned_ahead); else planned at rest from here, below, never re-planned by the
+        # runner, which would skip home's step clear and its checks
+        home_legs = rp._planned_ahead(ctx, runner, home_legs) or []
+        if not home_legs and said_flies:
+            # the retreat_from_live row said this home flies, as the retreat was planned to end; from where the
+            # arm stood once the retreat had flown, it did not (the home_ahead row says how far off)
+            runner.note("retreat_from_live_after", home_flies=False)
     if home_legs:
         res = runner.run(home_legs, execute=True)
         if not all(r.ok for r in res):

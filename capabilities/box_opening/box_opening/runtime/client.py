@@ -75,6 +75,16 @@ except ImportError:
 
 _GRIPPER_JOINT_HINTS = ("robotiq", "knuckle", "finger")
 
+# how PlannerClient.execute begins the message of a "failed" goal the driver never took: nothing sent,
+# or the driver rejected it. Every other "failed" went to the arm, which may have moved
+NOT_TAKEN = (
+    "motion disabled",
+    "execute_joint_trajectory not available",
+    "no fresh /joint_states",
+    "refused before sending",
+    "goal rejected by the driver",
+)
+
 # the arm driver's contact monitor and its force estimate (kinova_gen3_ros2): the residual r
 # (sensor_msgs/JointState, effort = r in N·m, 50 Hz, published with contact_debug_topic on),
 # the tool's state with the driver's estimate of the external wrench (rammp_arm_interfaces/

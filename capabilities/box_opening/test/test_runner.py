@@ -994,6 +994,31 @@ def test_flagged_gripper_leg_is_not_sent_under_a_guarded_motion(tmp_path):
     r.finish()
 
 
+def test_a_gripper_leg_sent_under_a_motion_is_forgotten_once_joined_and_never_stands_in_for_a_later_one(
+    tmp_path, monkeypatch
+):
+    """The runner tells an early-sent leg by its identity. Every leg here is
+    given the same one (as a later leg Python puts where a freed one stood
+    would be): the open that rode the retreat is skipped once, where it comes
+    up, and the close of a later run still goes out."""
+    import box_opening.runtime.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "id", lambda _obj: 7, raising=False)
+    c = _AsyncGripClient()
+    r = runner(c, tmp_path)
+    open_leg = leg("grip:open", kind=Kind.GRIPPER, cmd=0.0, chain=1, world="interaction_b")
+    open_leg.defer_join = open_leg.send_with_previous_motion = True
+    g = GuardSpec(touch_nm=7.0, trip="obstruction")
+    down = leg("grip:down", Q1, Q2, guard=g, world="interaction_b", chain=2)
+    r.run([leg("retreat", Q0, Q1, chain=1, world="interaction_b"), open_leg, down], execute=True)
+    assert c.events == ["execute", "send", "join", "execute"]  # the open sent once, joined once
+    assert not r._sent_early  # nothing remembered after the join
+    close = leg("grip:close", kind=Kind.GRIPPER, cmd=0.8, chain=3)
+    res = r.run([close], execute=True)
+    assert [(x.leg_name, x.ok) for x in res] == [("grip:close", True)]
+    assert c.events[4:] == ["send", "join"]  # the close went out
+
+
 class _StillGripClient(_AsyncGripClient):
     """_AsyncGripClient whose waits for a still arm are events too, each
     answering `settle` (s waited, timed out)."""

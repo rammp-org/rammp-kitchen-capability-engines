@@ -898,8 +898,63 @@ def test_a_run_past_its_budget_is_stopped_its_own_way_before_the_orchestrators_c
     t0 = time.monotonic()
     with pytest.raises(EngineError) as e:
         engine.execute("open_box", {}, FakeCtx())
-    assert e.value.error_code == "timeout" and e.value.recoverable and sent == [signal.SIGINT]
+    # (the arm stood at the look pose, where the run took it: not recoverable, as STOP_CODES' rule says)
+    assert e.value.error_code == "timeout" and not e.value.recoverable and sent == [signal.SIGINT]
     assert time.monotonic() - t0 < 5.0
+
+
+CUT = ["", "Ctrl+C — cancel delivered; the driver stops and holds"]  # what the client says of a motion cut
+WAYPOINT = {"leg": "home-waypoint", "kind": "motion", "ok": True, "outcome": "arrived"}
+# a look the driver stopped part way (which the run asks again after), and a way home that did the same
+LOOK_PART_WAY = {"leg": "reach:look", "kind": "motion", "ok": False, "outcome": "failed", "progress": 0.4}
+HOME_PART_WAY = {"leg": "home", "kind": "motion", "ok": False, "outcome": "failed", "progress": 0.4}
+
+
+@pytest.mark.parametrize(
+    "rows, say, recoverable",
+    [
+        (FULL_RUN[:1], [], True),
+        (FULL_RUN, [], True),
+        (FULL_RUN[:14], CUT, False),
+        (FULL_RUN[:13], [], False),
+        ([FULL_RUN[-1], *FULL_RUN[:1]], CUT, False),
+        ([*FULL_RUN[:14], WAYPOINT], [], False),
+        ([*FULL_RUN[:1], LOOK_PART_WAY], [], False),
+        ([*FULL_RUN[:14], HOME_PART_WAY], [], False),
+    ],
+    ids=[
+        "nothing moved",
+        "the arm home",
+        "cut part way home",
+        "standing after the retreat",
+        "cut on its way out",
+        "between the legs of its way home",
+        "standing where a look stopped part way",
+        "standing where its way home stopped part way",
+    ],
+)
+def test_a_timeout_is_recoverable_only_where_nothing_moved_or_the_arm_is_home(
+    engine, monkeypatch, rows, say, recoverable
+):
+    """STOP_CODES' rule for a timeout too: recoverable only where the run had moved nothing, or stood home,
+    when its budget stopped it — nothing held in each of these. A motion the Ctrl+C cut part way (its
+    client says so), or the arm standing where the run took it, is not."""
+    given(monkeypatch, rows, say, wait=True)
+    monkeypatch.setattr(node, "RUN_BUDGET_S", 0.5)
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, FakeCtx())
+    assert e.value.error_code == "timeout" and e.value.recoverable is recoverable
+
+
+def test_every_line_the_client_says_of_a_motion_a_ctrl_c_cut_holds_what_the_node_reads_for_it():
+    """The node tells a timeout that cut a motion part way by the client's own line (CUT_MID_MOTION): each of
+    the client's cancel lines must hold it, or a cut motion would read recoverable again."""
+    import inspect
+
+    from box_opening.runtime import client
+
+    said = [ln for ln in inspect.getsource(client).splitlines() if "log.info" in ln and "Ctrl+C" in ln]
+    assert len(said) == 3 and all(node.CUT_MID_MOTION in ln for ln in said), said
 
 
 def test_nothing_runs_unless_the_node_allows_it_and_it_is_not_offered(engine, monkeypatch):

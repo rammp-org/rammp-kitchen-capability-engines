@@ -825,7 +825,10 @@ class Runner:
             # that depends on the fingers having arrived: another gripper
             # leg, or any guarded motion (the press descends with them
             # closed). Everything else — a plain transit, a replan — is
-            # exactly what we want it to overlap with.
+            # exactly what we want it to overlap with. A gripper leg sent
+            # under the motion before it is still the one pending: told apart
+            # before the join forgets it, and skipped once, here
+            sent_early = lead.kind is Kind.GRIPPER and id(lead) in self._sent_early
             if self._pending is not None and (lead.kind is Kind.GRIPPER or any(g.guard is not None for g in group)):
                 res = self._join_pending()
                 results.append(res)
@@ -834,8 +837,8 @@ class Runner:
                     return results
 
             if lead.kind is Kind.GRIPPER:
-                if id(lead) in self._sent_early:
-                    continue  # dispatched under the previous motion; pending
+                if sent_early:
+                    continue  # dispatched under the previous motion; joined just above
                 if lead.send_when_still:
                     self.wait_still(lead.name)  # what the fingers close on stops moving first
                     if lead.when_still is not None:
@@ -1088,6 +1091,8 @@ class Runner:
     def _join_pending(self):
         leg, handle, t0 = self._pending
         self._pending = None
+        # an id is kept only while its leg is pending, so no later leg at the same address is taken for it
+        self._sent_early.discard(id(leg))
         res = self._join_gripper(leg, handle, t0)
         self._log(res, leg)
         return res

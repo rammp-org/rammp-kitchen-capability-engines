@@ -961,6 +961,8 @@ class Tracker:
         self.released = False
         self.held = False  # the lid in the fingers: from the grip that held it to its release or put-back
         self.held_said = False  # ... as the world state was last told (Capability._sync_held)
+        self.moved = False  # a motion of the run moved the arm (its row read)
+        self.home = False  # ... and the last that did was a way home (or to rest) that got there
         self.opened = None  # the object record's `opened`: None not asked, then the orchestrator's answer
         # what the run's NO BOX was, where its row says (guide.K_*: press_demo.no_container_kind), for the
         # panel's own sentence on how the action ended (END_NO_CURE)
@@ -984,6 +986,8 @@ class Tracker:
                 self.to_rest = False
             return self._note(leg, row)
         ok = bool(row.get("ok"))
+        if kind == "motion" and (ok or row.get("progress")):
+            self.moved, self.home = True, leg == "home" and ok
         if leg == "depth:press" and ok:
             self.presses += 1
         if leg == "grip:close":
@@ -1117,6 +1121,20 @@ def guide_rounds(asked):
         return int((asked or {}).get("n") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+# what the run's client says as a Ctrl+C cancels a motion in flight (runtime/client.py PlannerClient.execute)
+CUT_MID_MOTION = "Ctrl+C — cancel"
+
+
+def timeout_recoverable(track, lines):
+    """Whether a run stopped at its budget (its Ctrl+C) is recoverable, by STOP_CODES' rule: only where it
+    had moved nothing, or stood home, when it was stopped. What tells: its rows (Tracker.moved, .home: the
+    motions that moved the arm, the last of them a way home that got there) and its lines (a motion the
+    Ctrl+C cut part way says so). Anything else, the arm stood somewhere the run had taken it: not
+    recoverable. The lid in the fingers is the caller's (track.held)."""
+    cut = any(CUT_MID_MOTION in ln for ln in lines)
+    return not cut and (not track.moved or track.home)
 
 
 def error_for(action_id, code, lines):
@@ -2141,7 +2159,7 @@ class Capability(CapabilityEngine):
             error = EngineError(
                 "timeout",
                 f"the run took longer than {budget_s:.0f} s and was stopped its own way (Ctrl+C)",
-                recoverable=True,
+                recoverable=timeout_recoverable(track, run_.lines),
             )
         elif code != 0:
             error = error_for(action_id, code, run_.lines)
