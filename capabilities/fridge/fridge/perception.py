@@ -107,7 +107,14 @@ def _handle_like(height, width):
 class HandleDetector(door_common.perception.HandleDetector):
     check_door_vertical = False  # _door_plane checks the normal itself, so it can try the next plane instead
 
-    def __init__(self, handle_centre_to_face_m=0.070, door_square_to_arm=False, door_normal_from_handle=False):
+    def __init__(
+        self,
+        handle_centre_to_face_m=0.070,
+        door_square_to_arm=False,
+        door_normal_from_handle=False,
+        *,
+        hinge_direction=1,
+    ):
         if door_square_to_arm and door_normal_from_handle:
             raise ValueError("door_square_to_arm and door_normal_from_handle both set the door's normal: pick one")
         self.min_standoff = handle_centre_to_face_m * DOOR_STANDOFF_MIN_FRACTION
@@ -115,6 +122,7 @@ class HandleDetector(door_common.perception.HandleDetector):
         self.last_miss = ""  # why the last look found nothing, for the refusal
         self.door_square_to_arm = door_square_to_arm
         self.door_normal_from_handle = door_normal_from_handle
+        self.hinge_direction = hinge_direction
         self._merged = (None, None)  # (picked mask, it merged with the instances in its box): _normal_from_handle's
 
     def pick_handle_mask(self, instances, frame=None):
@@ -123,8 +131,22 @@ class HandleDetector(door_common.perception.HandleDetector):
         best-scoring instead -- on 11-04 that was a screwdriver on the bench, or a sideways handle on a door or
         cabinet across the room. An instance needs depth on it to be measured: one without (beyond the depth range,
         like those across the room) is not taken -- the handle within reach always had it (11-04: every look)."""
+        found, why = self._handle_candidates(instances, frame)
         if not instances:
             return None
+        if not found:
+            self.last_miss = f"no SAM 3 instance of {len(instances)} is handle-like ({'; '.join(why)})"
+            say(f"  {self.last_miss}")
+            return None
+        px, score, mask, label, what = max(found, key=lambda t: t[0])
+        say(f"  SAM 3: '{label}' {score:.2f}, {px} px, {what} -- of {len(instances)} instance(s)")
+        group = _merge_inside(mask, [m for _, m, _ in instances])
+        front = self._bar_in_front(mask, instances, frame)
+        self._merged = (front, group)  # _normal_from_handle fits the bar and its plate together
+        return front
+
+    def _handle_candidates(self, instances, frame):
+        """Return proposals with plausible metric dimensions and the rejected proposals' diagnostics."""
         found, why = [], []
         for score, mask, label in instances:
             px = int(np.count_nonzero(mask))
@@ -141,16 +163,7 @@ class HandleDetector(door_common.perception.HandleDetector):
                 continue
             height, width, rng = size
             found.append((px, score, mask, label, f"{height * 100:.0f} x {width * 100:.0f} cm at {rng:.2f} m"))
-        if not found:
-            self.last_miss = f"no SAM 3 instance of {len(instances)} is handle-like ({'; '.join(why)})"
-            say(f"  {self.last_miss}")
-            return None
-        px, score, mask, label, what = max(found, key=lambda t: t[0])
-        say(f"  SAM 3: '{label}' {score:.2f}, {px} px, {what} -- of {len(instances)} instance(s)")
-        group = _merge_inside(mask, [m for _, m, _ in instances])
-        front = self._bar_in_front(mask, instances, frame)
-        self._merged = (front, group)  # _normal_from_handle fits the bar and its plate together
-        return front
+        return found, why
 
     def _bar_in_front(self, mask, instances, frame):
         """`mask`, or -- when SAM 3 gave the bar and its plate apart and `mask` is the plate -- the bar: the instance
@@ -253,7 +266,7 @@ class HandleDetector(door_common.perception.HandleDetector):
         fwd[2] = 0.0
         n_out = -fwd / np.linalg.norm(fwd)  # the door's outward normal, roughly back toward the camera
         along = np.cross(n_out, [0.0, 0.0, 1.0])  # from the handle toward the hinge, in the arm's frame
-        a, b = self._bar, self._bar + Rb.T @ (along * 0.2)
+        a, b = self._bar, self._bar + Rb.T @ (along * (0.2 * self.hinge_direction))
         return 1.0 if (b[0] / b[2] - a[0] / a[2]) > 0 else -1.0
 
     def door_region(self, rgb, box, debug):
@@ -347,8 +360,7 @@ class HandleDetector(door_common.perception.HandleDetector):
         return det
 
     def _square_door(self, base_T_cam, normal=None):
-        """The detection without any door plane, the handle from its own depth: door_square_to_arm (`normal` None), or
-        door_normal_from_handle's `normal`."""
+        """Build the detection using the bar depth and the supplied or assumed door normal."""
         Rb, tb = base_T_cam[:3, :3], base_T_cam[:3, 3]
         lo, hi = self._bar_extent
         z0 = float(tb[2])
@@ -359,7 +371,7 @@ class HandleDetector(door_common.perception.HandleDetector):
         )
         say(
             f"  handle from its own depth: {self._bar_points} pts on the bar's front, z {lo + z0:.3f} to {hi + z0:.3f}"
-            f" -> middle {(lo + hi) / 2 + z0:.3f}; {how}, no door plane fit"
+            f" -> middle {(lo + hi) / 2 + z0:.3f}; {how}"
         )
         return {
             "handle": Rb @ self._bar + tb,

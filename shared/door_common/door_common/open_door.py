@@ -27,6 +27,8 @@ from capability_engine import sim
 from capability_engine.cornell_commands import CloseGripperCommand, OpenGripperCommand
 from scipy.spatial.transform import Rotation as R
 
+from door_common import timing
+
 from . import common as dc
 from .common import (
     ARM,
@@ -55,6 +57,7 @@ from .common import (
 
 # --- detection ---
 MAX_LOOKS = 5  # keep looking until two detections agree within DETECT_AGREE
+EARLY_EMPTY_ATTEMPTS = None  # opt in per capability
 MAX_EMPTY_RETRIES = 8  # per look: retries on an empty read (viewpoint-dependent YOLO misses)
 DETECT_AGREE = 0.03
 HINGE_AGREE = 0.03  # the two agreeing looks' hinges must agree this well too (horizontal)
@@ -316,6 +319,7 @@ def _check_arc(scene, rb, wps, q0):
 FRAME_ARM = None  # KEEP_ARM_IN_FRAMES: the arm, so each saved detection frame also keeps its joints + tool pose
 
 
+@timing.timed("debug_frame")
 def _save_frame(frame, tag, attempt, det):
     """Keep every detection's colour + depth frame (and the result) for looking at misses afterwards: real
     depth (uint16 mm), K and the camera pose (common.save_frame). Until 10-21 the depth was written
@@ -348,27 +352,45 @@ def _looks_agree(a, b):
     return NORMAL_AGREE_DEG is None or _normal_angle_deg(a[2], b[2]) <= NORMAL_AGREE_DEG
 
 
+class NoHandleProposal(Refused):
+    """SAM 3 returned a synchronized frame with zero instances on every attempt."""
+
+
+@timing.timed("agreement")
 def detect_handle():
     """Two agreeing looks. Returns (handle position, handle orientation, door normal, door_z, door_mid, hinge)."""
     cam = dc.camera()
-    if not cam.wait_for_frames(30.0):
-        raise Refused("No RGB-D frames")
+    with timing.span("wait_for_rgbd"):
+        if not cam.wait_for_frames(30.0):
+            raise Refused("No RGB-D frames")
     detector = MAKE_DETECTOR()
 
+    @timing.timed("look")
     def look(tag):
+        empty_proposals = 0
         for attempt in range(1, MAX_EMPTY_RETRIES + 1):
+            _checkpoint()
             instances = None
             if HANDLE_SOURCE == "sam3" and hasattr(cam, "sam3_detect"):
                 # SAM 3 segments the newest image when asked: detect on that very frame (its depth, its camera pose)
-                instances, f = cam.sam3_detect()
+                with timing.span("sam3_capture"):
+                    instances, f = cam.sam3_detect()
+                if f is not None and not instances:
+                    empty_proposals += 1
                 if f is None:
                     say(f"  no SAM 3 mask with its RGB-D frame on look {tag} (retry {attempt}/{MAX_EMPTY_RETRIES})")
-                    time.sleep(0.5)
+                    if attempt < MAX_EMPTY_RETRIES:
+                        with timing.span("retry_sleep"):
+                            time.sleep(0.5)
                     continue
             else:
-                f = cam.grab()
+                with timing.span("capture"):
+                    f = cam.grab()
             if getattr(cam, "box_topic", "") and f["box"] is None:
                 det = None  # boxer has no usable microwave box yet (grab said why): retry, never YOLO instead
+            elif instances is not None and hasattr(detector, "detect_instances"):
+                with timing.span("fit"):
+                    det, f["handle_mask"] = detector.detect_instances(instances, f)
             else:
                 # handle_source "sam3": SAM 3 masks the handle on the wrist image (the door still comes from depth).
                 # A detector with pick_handle_mask chooses among SAM 3's instances (with the frame: its depth); else the
@@ -389,7 +411,7 @@ def detect_handle():
                 det = (
                     None
                     if HANDLE_SOURCE == "sam3" and mask is None
-                    else detector.detect(
+                    else timing.timed("fit")(detector.detect)(
                         f["rgb"], f["K"], f["depth_mm"], f["base_T_cam"], box=f.get("box"), handle_mask=mask
                     )
                 )
@@ -397,10 +419,15 @@ def detect_handle():
             if det is not None:
                 break
             say(f"  no detection on look {tag} (retry {attempt}/{MAX_EMPTY_RETRIES})")
-            time.sleep(0.5)
+            if tag == "1" and EARLY_EMPTY_ATTEMPTS == attempt == empty_proposals:
+                raise NoHandleProposal(f"NO DETECTION ({tag}) after {attempt} synchronized empty SAM 3 replies")
+            if attempt < MAX_EMPTY_RETRIES:
+                with timing.span("retry_sleep"):
+                    time.sleep(0.5)
         else:
             why = getattr(detector, "last_miss", "")
-            raise Refused(f"NO DETECTION ({tag}) after {MAX_EMPTY_RETRIES} retries{': ' + why if why else ''}")
+            error = NoHandleProposal if tag == "1" and empty_proposals == MAX_EMPTY_RETRIES else Refused
+            raise error(f"NO DETECTION ({tag}) after {MAX_EMPTY_RETRIES} retries{': ' + why if why else ''}")
         say(
             f"  look {tag}: handle {np.round(det['handle'], 4)}  hinge {_rounded(det['hinge'], 4)}  "
             f"door normal {np.round(det['normal'], 3)}  door z {_rounded(det['door_z'], 3)}"
@@ -473,7 +500,7 @@ def _fingers_in_front(rb, q, face_pt, n):
     return best
 
 
-def grasp_pose(h, orient, n, pitch_deg=0.0, side_deg=0.0):
+def grasp_pose(h, orient, n, pitch_deg=0.0, side_deg=0.0, *, check_reach=True):
     """Grasp pose for handle position `h` (vertical-corrected here), squared to the door face, tilted
     `pitch_deg` nose-down about the finger axis. The tool point doesn't depend on the tilt."""
     h = h + np.array([0.0, 0.0, VERTICAL_CORR])
@@ -500,7 +527,7 @@ def grasp_pose(h, orient, n, pitch_deg=0.0, side_deg=0.0):
         quat = (rz * R.from_quat(quat)).as_quat()
         pos = h + rz.apply(pos - h)
     say(f"grasp {np.round(pos, 4)}  range {np.linalg.norm(pos):.3f}")
-    if np.linalg.norm(pos) > MAX_REACH or not _height_ok(pos[2]):
+    if check_reach and (np.linalg.norm(pos) > MAX_REACH or not _height_ok(pos[2])):
         raise Refused(
             f"GATE FAILED at grasp: range {np.linalg.norm(pos):.3f} (max {MAX_REACH}), "
             f"z {pos[2]:.3f} ({_height_limits()})"
@@ -574,8 +601,8 @@ def hinge_measured(offset, from_handle=False):
     fingers close -- the tool point stands ~5 cm in front of it), in the door's frame: into it, along it toward the
     hinge, up. For FIND_HINGE, as hinge_detected."""
 
-    def find(h_raw, orient, n, hinge_seen):
-        h, grasp = grasp_pose(h_raw, orient, n)
+    def find(h_raw, orient, n, hinge_seen, *, check_reach=True):
+        h, grasp = grasp_pose(h_raw, orient, n, check_reach=check_reach)
         into, along = -np.r_[n[:2], 0.0] / np.linalg.norm(n[:2]), np.cross(np.r_[n[:2], 0.0], [0.0, 0.0, 1.0])
         along /= np.linalg.norm(along)
         if hinge_seen is not None:

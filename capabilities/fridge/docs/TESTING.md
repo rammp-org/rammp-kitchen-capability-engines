@@ -1,350 +1,190 @@
-# Fridge open and close — how to test
+# Gen1.5 demo session
 
-- **Open** (`open`): detects the handle, grasps it **from the side** (the hand slides in along the door from the hinge
-  side, one finger between the bar and the door, tilted anywhere from 40° nose-up to 40° nose-down, level first),
-  pulls the door 60° open, lets go and pushes it on to 90°. With `"push_open": false`: a 90° pull, then let go and go
-  back round the door. `-p grasp:=front` on the node (T2) grasps from the front instead (`feature/15-fridge`'s grasp);
-  everything after the grasp is the same code.
-- **Close** (`close`): pushes the door from behind with the side of the hand to 45°; it swings shut from there.
-- **Wheelchair moves:** the close picks the smallest straight move (up to 35 cm back or forward) its plan needs; the open's push may need one between the pull and the push (up to 35 cm; the side grasp more often than the front: the 11-10 sim of this code: see the side sweep). You make them
-  by hand when the goal asks, or the goal drives the base: [Driving the base](#driving-the-base-drive_base).
+Work down the checklist. Save the failed run before changing anything. One operator can do the survey, dry runs and
+empty-chair trials from the stop station. For occupied trials, have the rider and a separate operator on the stop.
 
-T1–T4 are four terminals on the robot's computer: T1 sheppy, T2 the fridge node, T3 goals, T4 the e-stop.
+## 1. Set up
 
-## Set up
+- [ ] Pin the fridge image built from this checkout and record its ID, the deployment revision, robot profile and
+  applied ROS parameters. Build from the repo root with
+  `docker build --network host -f capabilities/fridge/Dockerfile -t fridge:ws11-hw .`. In `rammp-deployments/december_2026/sheppy-manifest.yaml`, use the current
+  [fridge fragment](../rammp-alternative.yaml) for the real setup. Check
+  `./config/robots/current:/config/robot:ro` and `mount_tilt_deg: 30`. Verify the floor, platform, seat and person layers
+  resolve in both containers. Check that `planner_world_dir` and `planner_world_dir_in_planner` are the two
+  views of the same shared world directory. Confirm the planner's `collision_cache_obb: 60` and retain the safety
+  layers. Save the deployed planner YAML.
+- [ ] Start Sheppy with the Gen1.5 robot config and the session profile. Check arm, planner, TF, wrist and scene RGB-D,
+  and SAM 3 (including its model mount). Use the same ROS domain and CycloneDDS as the deployment. On the Gen1.5
+  setup with separate interfaces, `eno1` is the MIB sensor network. Check there is one `/fridge/execute_action` server.
+  Start with `allow_execute: false` and docking, guided docking, scene fallback and translated wrist re-look off.
+  Before UI docking, check the deployed orchestrator's `execute_timeout_s`. Disable that deadline for attended
+  commissioning if supported, or raise it to cover the parking prompt, checked dock, planning and motion. Check
+  Stop still cancels. Record the value and set the demo timeout from measured full runs.
+- [ ] Ready the stop terminal. Test engage and release at rest and verify `/control_status` changes. Once the arm is
+  clear, verify the software stop during the first empty-chair, low-speed arm-only move before any contact. Check
+  the release and `/clear_faults` before resuming. Keep the physical stop accessible according to the site's procedure
+  for an arm that can drop on power loss.
 
-```bash
-# Once, and after any code change, from this repo's root (no internet: see "Building offline" below)
-docker build --network host -f capabilities/fridge/Dockerfile -t ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev .
-
-# T1, from rammp-deployments on dev
-uv run scripts/set_robot.py december_2026/config/robots/flatbot
-sheppy up flatbot --manifest december_2026/sheppy-manifest.yaml && sheppy status
-
-# T2, the fridge node (mount_tilt_deg 30 on flatbot, 0 on dojo; allow_execute:=false makes every goal a dry run).
-# On eno1, the sensor network the MIB (the base) is on; the default config picks enp3s0 and never sees the base.
-docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 \
-  -e 'CYCLONEDDS_URI=<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>' \
-  -v /tmp/fridge_data:/fridge_data -v curobo_kernel_cache:/planner_cache \
-  ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-  ros2 run fridge fridge_node --ros-args -p use_orchestrator:=false -p allow_execute:=true \
-  -p mount_tilt_deg:=30 -p grasp:=side \
-  -p planner_world_dir:=/planner_cache/rammp_planner_worlds \
-  -p planner_world_dir_in_planner:=/root/.cache/rammp_planner_worlds
-
-# T3: the goal commands below (Open, Close), each a docker run
-
-# T3, before any runs (and after any fault): clear the arm's faults
-docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-  -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-  ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-  ros2 service call /clear_faults std_srvs/srv/Trigger
-```
-
-- **SAM 3** finds the handle; its weights are mounted from `/home/abra/sam3-test/models/sam3` (check it exists).
-  `sheppy status` should show `sam3` running (`sheppy logs sam3` if not).
-- **The door's angle:** the handle model fit on the wrist camera (`door_normal: handle_model`); `-p door_normal:=square`
-  assumes it square to the arm (place the wheelchair square). `-p detect_camera:=scene` uses the scene camera.
-- **The planner** reads the fridge world through the `curobo_kernel_cache` volume it already mounts at `/root/.cache`
-  (T2 mounts it too), so the manifest needs no extra volume. `config ... fridge_world.yaml not found` = T2 lacks it. If
-  every plan fails with `EXCEPTION`: `sheppy restart planner`.
-- **Depth instead of SAM 3:** `-p handle_source:=depth -p door_normal:=plane`. Needs a matte door.
-- **Wrist stereo (for FoundationStereo later, never yet seen live):** the bag records it only if the wrist OAK
-  publishes it. Add to its params in the robot profile (compressed: the raw pair doesn't fit its 100 Mbit/s link):
-  ```yaml
-  depth.i_left_rect_publish_topic: true
-  depth.i_right_rect_publish_topic: true
-  depth.i_left_rect_low_bandwidth: true
-  depth.i_right_rect_low_bandwidth: true
-  depth.i_left_rect_low_bandwidth_quality: 95
-  depth.i_right_rect_low_bandwidth_quality: 95
-  ```
-  Check `ros2 topic hz /wrist_camera/infra1/image_rect_raw` (and `infra2`) gives ~15 Hz and the colour and depth still
-  do. The names come from the driver's source: if the camera's differ, set the `wrist_infra*_topic` parameters. After a
-  run the console should say `M stereo pairs` with M close to N; 0 means nothing was recorded.
-
-## UI
-
-The fridge's buttons on the UI (`docs/interface.md`, "UI buttons"). Needs Unreal running and `~/ros2_ws` built with
-rammp-orchestrator (`feat/orchestrator`) and rammp-UI-bridge (`init`).
+Run these from the robot host. Use the arm container name deployed by Sheppy.
 
 ```bash
-# U1-U3, each: Cyclone on eno1, as T2 (Fast DDS, or another interface, doesn't see the fridge node)
-source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash
-export ROS_DOMAIN_ID=0 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI='<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>'
-ros2 run rammp_ui_bridge ui_bridge_node                    # U1
-ros2 run rammp_orchestrator orchestrator_node              # U2
-ros2 run rammp_orchestrator interactive_perception_node    # U3, then type: add fridge_1 fridge
-```
-
-T1 as in Set up; T2 as in Set up but `-p use_orchestrator:=true`. The buttons move the arm (`allow_execute:=true`);
-first try them with `-p mock:=true`: nothing moves and each ends "Mock: ... No arm motion."
-
-In Unreal select **fridge_1**: it offers five buttons. Each shows what it is doing, with **Stop**, then a panel with
-**Done** (it waits at most 30 s; a question at most 600 s). **Stop** stops the arm (and base) where it is and shows
-"Stopped. ..."; after Stop during an open, if the hand is on the handle, send `release_only` before anything else.
-
-- **Go to Fridge** → "The arm is in front of the fridge."
-- **Open Fridge Door** → "Fridge door opened." If the push needs it, first: "Move your wheelchair straight back ...
-  about N cm ..." Move it, press **Continue** (or **Stop**).
-- **Close Fridge Door** (grip the container first, as in Close step 1) → "Fridge door closed." It may first ask for a
-  wheelchair move, as the open does. Move the wheelchair forward again after.
-- **... (wheelchair drives)**: the same, but the base drives the move at 0.03 m/s (Arm + Drive Base, "Before").
-- A refusal: `Couldn't ... Press <button> to try again.` with that button and **Stop**. Any other failure: an error
-  panel with **Done**; after a failed open, if it says the hand may still be holding the handle, send `release_only`.
-
-No panels: T2 logs `standalone/no session token` (check `use_orchestrator:=true`) or
-`request_user_input server unavailable` (U1 down, or not on Cyclone).
-
-## How to stop the robot
-
-| How                                      | Effect                                                                   |
-| ---------------------------------------- | ------------------------------------------------------------------------ |
-| **Software e-stop in T4** (first choice) | The arm **holds where it is**, powered. Motion is refused until cleared. |
-| **Ctrl-C in T2**                         | Stops the node and its motion; the arm stops and holds, powered.         |
-| Physical e-stop button                   | Last resort only: it cuts power and the arm drops.                       |
-
-While the base drives, the same T4 e-stop stops it too (the node watches the arm's e-stop and stops the base),
-and so does Ctrl-C in T2. See [Driving the base](#driving-the-base-drive_base).
-
-Send the e-stop from the arm's own container (`docker exec sheppy-arm`, both `source` lines). Since the arm
-image was updated (after 11-06) `EStop` is the NEW message: `uint8 state` (1 = engage, 0 = not), no `engaged` field
--- the old `{engaged: true}` fails with `Failed to populate field: 'EStop' object has no attribute 'engaged'`.
-Check with `ros2 interface show rammp_common_interfaces/msg/EStop` in that container. **2026-11-09: these two are
-NOT yet verified on the arm** -- test at rest first (`docker logs -f sheppy-arm` should print
-`E-STOP engaged by 'operator'` then `e-stop RELEASED by 'operator'`), then while it moves. Keep the stop typed out in T4:
-
-```bash
-# stop (repeats at 10 Hz; Ctrl-C once the arm has halted)
-docker exec -it sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
+# Engage, repeated until stopped. Ctrl-C in this terminal to end the publisher.
+docker exec -it sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash &&
   ros2 topic pub -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 1, source: operator, reason: stop}"'
-# release, only right before you continue (if it does not release: `sheppy restart arm`); then clear the faults (Set up, T3)
-docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
+# Clear once the area is clear and the stop publisher has ended.
+docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash &&
   ros2 topic pub -t 10 -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 0, source: operator, reason: clear}"'
 ```
 
-Two things the arm driver does (its `docs/interface.md`, "The e-stop"; both bit on 11-12):
-
-- **Ctrl-C must reach the stop's publisher**: hence `docker exec -it`. Without `-t`, Ctrl-C ends only the docker
-  client; `ros2 topic pub` keeps running inside `sheppy-arm`, keeps the arm stopped, and re-stops it after every
-  release. Check with `docker exec sheppy-arm ps -eo pid,args | grep "topic pub"`; end one left over with
-  `docker exec sheppy-arm kill -INT <pid>`.
-- **The release is a plain `state: 0` from the same `source`, with no `clear_target`.** A message with
-  `clear_target` set is the MIB's clear handshake and never releases anything. The driver logs
-  `E-STOP engaged by 'operator'` on the stop and the release on a release; `/control_status` shows `estopped`.
-  After the release, `/clear_faults` before the next action, or its first motion stops short.
-
-## Arm + Drive Base
-
-Add `"drive_base": true, "base_speed": 0.03` to an executing goal and it makes the wheelchair move itself, straight,
-a fixed distance (at most 35 cm, ending within 1 cm), then carries on. No `chair_moved` goal. **Use 0.03 m/s while testing.**
-
-**Before:** clear 40 cm in front of and behind the base, and check that the MIB is talking and odometry is live:
+In a shell with the deployment's ROS interfaces and DDS environment sourced, use:
 
 ```bash
-docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-  -e CYCLONEDDS_URI='<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>' \
-  ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-  bash -lc 'ros2 topic echo --once /rammp/mib/status rammp_base_interfaces/msg/MibStatus --field system_state; \
-    echo "live odom (5 s):"; timeout 5 ros2 topic echo /base/odom nav_msgs/msg/Odometry \
-    --qos-durability volatile --qos-reliability best_effort --field header.stamp.sec'
-```
-
-- **Pass:** a `system_state` (1 = IDLE), then a steady stream of odom stamps (20 Hz) for 5 s.
-- **Status prints, odom prints nothing:** the MIB is up but the drive motor boards are not reporting to it. The MIB
-  publishes `/base/odom` only from fresh drive-wheel motor states (RAMMP-mib-fw `publish_odometry`), even at rest, so
-  `drive_base` refuses with `no /base/odom`. Fix it on the base (motor power, power-cycle the base, or the MIB panel
-  `tools/mib_panel` in RAMMP-mib-fw, which shows each motor online/offline and its faults), not in this code.
-- **Nothing prints, or `does not appear to be published yet`:** the command is not on `eno1`, the sensor network the
-  MIB is on (the default Cyclone config picks `enp3s0`, the arm's cable), or the MIB is off.
-
-Why this command: the message types are given because without them `echo` looks the topic up before the MIB has
-been discovered and gives up (`Could not determine the type`). The odom echo is `volatile` because `/base/odom` is
-transient-local: a plain `echo --once` gets the last saved message replayed and "passes" even when odometry stopped
-long ago. "Malformed packet received from vendor 13.37" lines come from a device on the sensor network and can be
-ignored here. T2 must run on `eno1` too (see Set up), or `drive_base` refuses with `no /base/odom`.
-
-### Open
-
-First send the arm to the fridge start pose (`go_to_start`, as in [Without drive base](#without-drive-base), step 1),
-then:
-
-```bash
-docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-  -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-  ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
+fridge_goal() {
   ros2 action send_goal --feedback /fridge/execute_action \
-  rammp_orchestrator_interfaces/action/ExecuteAction \
-  '{engine_id: fridge, action_id: open, params_json: "{\"execute\": true, \"speed\": 0.2, \"drive_base\": true, \"base_speed\": 0.03}"}'
+    rammp_orchestrator_interfaces/action/ExecuteAction \
+    "{engine_id: fridge, action_id: $1, params_json: '$2'}"
+}
+fridge_goal go_to_start '{"execute":false,"speed":0.2}'
+# After the area is clear and the e-stop is released:
+ros2 service call /clear_faults std_srvs/srv/Trigger
 ```
 
-### Close
+## 2. Survey and mark the site
+
+- [ ] Measure the handle anchor height, straight bar length and cross-section, door top and bottom heights, width
+  and depth including bins, fridge body dimensions and cabinet support height. Measure the hinge side facing the
+  fridge and pin offsets from the handle anchor. Fixture A is left hinged. The model puts the pin 49 mm inward
+  and 374 mm along the door from the fitted outer anchor. Record those datums and the measurements. Update the
+  [measured geometry parameters](interface.md) and check that the model covers the surveyed solid surfaces.
+- [ ] With the robot clear, measure breakaway force and moving force at about 30° and 80° using a pull scale at the
+  bar, tangential to the swing. Record N, angle and direction, and any closing drift or cabinet motion.
+  Repeat dry checks after changes to the fixture. Stop if the cabinet shifts or the swing corridor is obstructed.
+- [ ] Lay down a taped axle-midpoint mark and a chair heading line. Position the closed-door handle anchor at
+  `(x, y) = (0.825, -0.235) m` in the cuRobo `arm_mount` frame, with the inward normal at −14° relative to chair
+  forward. For the stock measured Gen1.5, the mount is `(+0.116, +0.284) m` from the axle in chair axes, so the
+  handle anchor projects to `(+0.941, +0.049) m` from the axle. For fixture A the nominal floor mark is 0.97 m
+  out from the closed front and 0.65 m along the front from the hinge toward the handle. Point the chair 14°
+  toward the hinge from square. Use the verified transform if it differs. Photograph
+  the mark with the axle reference, heading line and measured clearance. Verify sight lines for both cameras
+  and clear the full chair, arm and door sweep before checking the mark under motion.
+
+## 3. Cameras and dry-run ladder
+
+- [ ] Mock the UI first if it will be used. Check Go to Fridge, Open, Done and Stop. The parking prompt is checked in the
+  attended UI trial below. Run `go_to_start` with `execute: false` on the real stack. Inspect the planned path
+  in the clear area. After the stop test, stage at `speed: 0.2` with the empty chair and room away from the fridge,
+  then park at the mark. Return `allow_execute` to false for the dry runs. Log start joints and clearances.
+- [ ] At the same stationary pose with the door shut, dry-run Open once per camera with `detect_camera:=wrist` and
+  `detect_camera:=scene`. Repeat at the intended lighting and selected small offsets around the mark. Log exposure,
+  gain, RGB-D stamps, masks, depth holes, TF revisions and each settled handle XYZ and outward unit normal in
+  `arm_mount`. Check the matched RGB/depth overlay and avoid clipped highlights over the bar and adjacent door.
+  Adjust exposure on the actual camera driver and rerun. The survey pass is ≤30 mm Euclidean separation and ≤5°
+  between normals. Require ≤3° before fine-dock as well, since `confirm_wrist` uses 30 mm / 3° at this revision.
+  A failed detection or excess disagreement stops execution here. Restore wrist as the primary camera.
+- [ ] From the mark, dry-run Standard, then Fast and Hook before their first respective executing trials. For
+  Standard, repeat at representative ±3 cm / ±3° offsets with verified clearance. Inspect the complete approach,
+  pull, inner-face push and retreat. Expect a front-grasp family at the nominal mark and a checked route to 90°.
+  Log stage and refusal reason, selected grasp and handoff, world box count, planner calls and elapsed seconds.
+  On the Jetson, time cold and warm searches with normal camera, SAM 3 and bag load. Repeated full plans must fit
+  the session latency budget and the 240 s per-search ceiling (`PLAN_BUDGET_S` in `constants.py`). Investigate
+  overruns or box-budget refusals before changing either budget. If testing scene fallback, change only
+  `open_scene_fallback_enabled` after camera agreement. Check which source supplied the successful plan in the log,
+  and keep translated wrist re-look off until its approach has been verified separately.
 
 ```bash
-docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-  -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-  ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-  ros2 action send_goal --feedback /fridge/execute_action \
-  rammp_orchestrator_interfaces/action/ExecuteAction \
-  '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"speed\": 0.7, \"drive_base\": true, \"base_speed\": 0.03}"}'
+fridge_goal open '{"execute":false,"drive_base":false,"base_moves":false,"profile":"standard","speed":0.2}'
 ```
 
-T2 logs `drive_base: driving the wheelchair ...` and `drive_base: stopped ...`. The base stays where it drove: if it
-is still back from a close, send the next close with `chair_moved` instead of `drive_base`, or it drives the picked move again.
+## 4. Grasp confirmation and Standard Open, base parked
 
-**Stopping it:** the T4 e-stop or Ctrl-C in T2, or the joystick if the base has one. It also stops by itself, failing
-the goal with `base_stopped` and leaving the arm holding, if it goes the wrong way or further than asked, takes more
-than distance / speed + 5 s, ends more than 1 cm off, or loses odometry. Check where the base is before the next goal.
-
-**First drive: test the e-stop.** Send the close, hit the T4 e-stop while the base moves, and check it stops at once.
-Do this before relying on it.
-
-## Without drive base
-
-### Open
-
-1. **The start pose:** in T3, plan it first (`"execute": false`), then send it with `"execute": true`:
-
-   ```bash
-   docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-     -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-     ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-     ros2 action send_goal --feedback /fridge/execute_action \
-     rammp_orchestrator_interfaces/action/ExecuteAction \
-     '{engine_id: fridge, action_id: go_to_start, params_json: "{\"execute\": true, \"speed\": 0.2}"}'
-   ```
-
-   cuRobo plans round the wheelchair's layers, not the fridge (not detected yet): keep the way clear of it.
-
-1. **Point the camera square-on at the closed door**, ~50–60 cm from it, the handle in view, by placing the
-   wheelchair (side grasp: aim for `handle (mean)` x 0.70–0.85, y −0.40 to −0.20, the middle of where the side
-   grasp's planner planned in sim; front grasp: x 0.85–1.0, y −0.20 to −0.34).
-
-1. **T3, the open:**
-
-   ```bash
-   docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-     -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-     ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-     ros2 action send_goal --feedback /fridge/execute_action \
-     rammp_orchestrator_interfaces/action/ExecuteAction \
-     '{engine_id: fridge, action_id: open, params_json: "{\"execute\": true, \"speed\": 0.2}"}'
-   ```
-
-   It pulls to 60° (with the side grasp the hand turns up to 30° less than the door, the bar turning in the gripper)
-   and stops, lets go, slides back off the bar, moves out and round to in front of the handle (where the front grasp's
-   back-off ends) and pushes on, or stops with
-   `Pull done and the hand is off the handle. Move the WHEELCHAIR straight back ~5 cm ...`. A refused plan
-   (dry run or not) then spends up to 90 s planning it again for wheelchair moves of 5 and 10 cm and ends
-   `checked by planning it: the open plans with ... -- move the wheelchair ...` (or that no such move helps:
-   the refusal isn't about placement). Prefer that over the `placement:` lines, which come from a sim.
-
-   **Without any wheelchair move** add `\"base_moves\": false` to the params (e.g.
-   `"{\"execute\": false, \"base_moves\": false}"` for the dry run): the push must plan from where the chair
-   stands, or the open refuses before anything moves. The handle cells (x, y) (0.65, −0.15), (0.65, −0.10),
-   (0.65, −0.05), (0.70, −0.15), (0.75, −0.25) and (0.90, −0.10) planned in sim only with the move, so the
-   `placement:` advice leaves them out. Those cells are the **front** grasp's: the side grasp has no such list (its
-   sim mostly planned only with a move), so with `grasp:=side` the advice may name a spot whose open then refuses,
-   before anything moves.
-
-1. **Only if asked:** move the wheelchair as it says (without turning it), then
-   push the door on to 90°, in T3:
-
-   ```bash
-   docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-     -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-     ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-     ros2 action send_goal --feedback /fridge/execute_action \
-     rammp_orchestrator_interfaces/action/ExecuteAction \
-     '{engine_id: fridge, action_id: open, params_json: "{\"execute\": true, \"chair_moved\": true, \"speed\": 0.2}"}'
-   ```
-
-Any failed check refuses with nothing moved; a dry run (`"execute": false`) plans everything with cuRobo and says in
-advance what it will do. cuRobo plans round the planner's wheelchair and occupant boxes, but those are best guesses:
-**keep the space in front of the arm's base clear**, and start from a pose outside them (the web app's Fridge pose;
-a start inside them refuses at once, naming the boxes). Watch where the fingers close (the gripper closes as the pull
-starts) and whether the fridge drags during the pull (hinge values off). **Side grasp, first runs:** dry-run first and
-watch the slide in at a low `speed`: the finger behind the bar must pass between it and the door. Its depth on the bar
-is the one that worked on 11-06 (`SIDE_PADS_INTO_M`, `SIDE_PADS_PAST_BAR_M`), found with the scene camera's handle
-point; the wrist camera's (the default `detect_camera`) is unchecked for it. If the finger meets the bar's front or the
-door, stop (T4) and say how far off it was. The plan names the grasp it picked (`plan: side grasp, tilt +10 deg, ...`). A look failing with `handle model fit ...`
-says why the door's angle couldn't be measured (the handle too far, too little of it seen).
-
-Options: `execute` (`false`: dry run), `speed` (0–1, scales every motion), `push_open` (`false`: 90° pull, no push),
-`swing_deg` (the pull, 30–110; at most 85 with the push), `grasp_offset_m` (grasp this far above the bar's middle),
-`chair_moved`, `release_only` (only let go and back off, after a run stopped holding the handle), `save_door` (a dry
-run that plans OK also writes `door.json`, for testing the close without an executed open).
-
-### Close
-
-1. **Grip the container** by teleop, the hand ≥5 cm from the door and clear of the chair.
-
-1. **Plan, T3**, the wheelchair where it was for the open:
-
-   ```bash
-   docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-     -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-     ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-     ros2 action send_goal --feedback /fridge/execute_action \
-     rammp_orchestrator_interfaces/action/ExecuteAction \
-     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": false, \"speed\": 0.7}"}'
-   ```
-
-   It ends
-   `Plan OK. Move the WHEELCHAIR straight back ~N cm ...` (or forward; the smallest move, up to 35 cm, after which
-   the close plans) or says which check failed.
-
-1. **Move the wheelchair as it says**, straight, without turning it (the close goal then uses that move).
-
-1. **Close, T3:**
-
-   ```bash
-   docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-     -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-     ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-     ros2 action send_goal --feedback /fridge/execute_action \
-     rammp_orchestrator_interfaces/action/ExecuteAction \
-     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"chair_moved\": true, \"speed\": 0.7}"}'
-   ```
-
-   It goes round the door's free edge, behind it,
-   swings the door to ~45° and backs out; the door swings shut from there. Move the wheelchair forward again after.
-
-- **Speed:** the close runs at 0.7 by default. **Keep it at 0.7 or more**: slower, the swing doesn't carry the door
-  shut.
-- **Several closes in a row:** a close that swings the door saves it as 45° open in `door.json`
-  (`/tmp/fridge_data/door.json` on the robot). The next close then plans for a door at 45° and, with the door really
-  open further, refuses. Give the door's real
-  angle in the close goal's `params_json`, e.g. `{\"execute\": true, \"chair_moved\": true, \"door_deg\": 90}` (or set
-  `"door_open_deg"` in `door.json` back to it).
-- **Without an executed open:** dry-run the open with `"save_door": true` until it plans OK, then open the door by hand
-  to the angle it prints (90° after the push-open).
-
-Options: `door_deg`, `chair_back` (m, + back, - forward; default: the plan picks it), `close_to_deg` (45), `push_radius`
-(default: searched), `push_z` (default: searched), `speed` (0.7), `retreat_dist`. The close carries the container
-when the gripper is closed at its start, and not when it is open.
-
-## Runs
-
-Saved in `/tmp/fridge_data/` (`door.json`, `runs/`, `detections/`). Each run has a `console.log` and a rosbag of the
-cameras, boxer's boxes and TF (`-p record_bag:=false` turns it off). Copy them off after a session: `/tmp` is cleared on
-reboot.
-
-## Building offline (no internet)
-
-The normal build needs the network. For a source-only change (Python or launch files, nothing in a `package.xml`, the
-`pip` pins or the RAMMP-CuRobo commit), rebuild on top of the image you have:
+- [ ] Calibrate the gripper before the first pull. Using the supported gripper controls, perform repeated attended
+  closes in free space and on the straight section of a secured matching bar, at the planned bite orientation and
+  `GRASP_FORCE` (0.5). After each close settles, keep hands clear and record one window with the corresponding label.
+  Run the helper with the deployment's ROS setup sourced. Use a fresh output filename per close.
 
 ```bash
-cat > /tmp/fridge.offline.Dockerfile <<'EOF'
-FROM ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev
-WORKDIR /module_ws
-COPY capability_engine/ src/capability_engine/
-COPY shared/door_common/ src/door_common/
-COPY capabilities/fridge/ src/fridge/
-RUN . /opt/ros/humble/setup.sh && . /ros2_ws/install/setup.sh && colcon build && rm -rf build log
-EOF
-DOCKER_BUILDKIT=0 docker build --network host -f /tmp/fridge.offline.Dockerfile \
-  -t ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev .
+python3 scripts/fridge_calibrate_grasp_aperture.py empty empty-01.csv
+python3 scripts/fridge_calibrate_grasp_aperture.py bar bar-01.csv
 ```
+
+- [ ] Compare all settled gap ranges with the 10–42 mm gate in `constants.py` and the independently measured bar
+  thickness. Pass if empty closes stay below the lower bound and bar closes stay inside the gate with margin.
+  Save CSVs and measured gaps. If they overlap or the width is wrong, check feedback, force, finger alignment and
+  the 85 mm stroke estimate before adjusting `GRASP_GAP_MIN_M` / `GRASP_GAP_MAX_M` and repeating the fixture test.
+- [ ] Enable execution for the attended run. At the mark, resend the verified Standard goal with `execute: true`.
+  Watch finger insertion, confirmed gap, seal break, pull handoff, release/back-off, first push on the **inner**
+  face, and retreat. Log angles independently at the end of pull, after release, at push contact, at first 90° and
+  after retreat. Pass when the action completes, the stationary door remains at least 90°, and the chair has stayed
+  still throughout. Check release drift and contact entry before repeating a failed push. Stop at unexpected contact
+  or slip. If the hand may still be on the bar, check the actual door and arm pose before dry-running an attended
+  `release_only` goal. That goal needs valid saved door geometry. If it is missing or invalid, use the site
+  recovery procedure. Reset the door and chair only after the arm is clear.
+
+## 5. Hook, base parked
+
+- [ ] Use the dry-run ladder with `profile: hook` and check the planned 94° pull and withdrawal. Check that an
+  unavailable hook plan reports the checked Fast fallback. A fallback counts as a fallback in the log. Verify the
+  driver has fresh `/ee_state` in `arm_mount`. For J1–J7 diagnostics, configure the arm's
+  `contact_debug_topic: true` with contact detection enabled and check `/contact_monitor/residual` on the deployed
+  driver. Start the recorder before the reviewed low-speed pulls. Keep a CSV and console log per trial.
+
+```bash
+python3 scripts/fridge_record_hook_wrench.py record hook-trial-01.csv
+```
+
+- [ ] Use the production `hook late pull` line as the score. The gate uses the median **resisting hinge moment**
+  from the flange wrench during 83–92° of tool-inferred travel, at least three samples. The provisional
+  `HOOK_MIN_HINGE_LOAD_NM` is 0.08 N·m in `open_door.py`. Independently label retention from door observation
+  and record the score, sample count, speeds and final door angle. Compare repeated retained pulls to supervised,
+  independently labelled unloaded reference pulls on an approved clear bench setup with matching trajectory and
+  angle window. Keep Hook out of the demo if a comparable unloaded reference cannot be collected or the scores
+  overlap. Qualify Hook only after fresh held-out trials separate with margin, the selected hook completes
+  at ≥90° after retreat, and its Fast fallback passes step 7. Never induce a slip on the
+  installed fridge. An unverified pull stops before release and invalidates the saved door estimate. Use the site recovery procedure before returning to Standard.
+
+```bash
+python3 scripts/fridge_record_hook_wrench.py propose --retained retained-*.log --unloaded unloaded-*.log
+```
+
+## 6. Base checks and guided parking
+
+- [ ] With the arm safely parked, chair empty and floor clear, check live `/rammp/mib/status` and fresh
+  `/base/odom` with volatile, best-effort QoS (expect about 20 Hz even at rest). Measure the drive-wheel midpoint,
+  then compare tape and odometry on a short straight and turns in both directions. The stock
+  `docking_odom_to_axle_xy` assumes the odom child origin is the axle. Verify signs and offsets against the
+  measured `docking_axle_to_mount_xy` above. Log residual axle translation on a turn and straight distance
+  error. Resolve mismatches before docking. Compare against the 8 mm / 0.7° leg tolerances.
+- [ ] In the approved base commissioning mode, start at 0.02 m/s and repeat at 0.03 m/s if stopping margins allow.
+  Verify commanded zero, cancel, joystick takeover, software e-stop and loss-of-command watchdog (300 ms from the
+  last fresh command). Record command/odom timestamps, MIB mode, stop latency and physical braking distance.
+  Pass only when every stop behaves as expected and fits the measured clearance. Commission yaw separately from
+  the lowest stable turning speed. Set `docking_max_linear_speed` and `docking_max_yaw_speed` to the verified
+  caps. The shipping caps are 0.05 m/s and 0.12 rad/s. UI requests 0.03 m/s before capping.
+- [ ] With the checked arm start pose, set `docking_enabled: true`, `guided_docking_enabled: true` and
+  `guided_parking_instruction` to name the taped axle and heading marks. Bring up the orchestrator/UI with
+  `use_orchestrator: true`. Press **Open Fridge Door (wheelchair drives)**, park, stop, and press **Continue**.
+  This hands off to checked autonomous fine-dock. The UI goal uses Standard at arm speed 0.7, so qualify that
+  speed first with the base parked. Use direct Standard drive goals with explicit lower speeds for commissioning
+  the fine-dock path before the UI trial. For example, once the 0.02 m/s check has passed, use
+  `fridge_goal open '{"execute":true,"profile":"standard","speed":0.2,"drive_base":true,"base_speed":0.02,"base_moves":true}'`.
+- [ ] Start the empty chair at the mark with zero correction, then try small known offsets (build up to about
+  10 cm / 5° if clear). Require a stopped final pose within 2.5 cm and 2° of target, camera confirmation and
+  a complete open to at least 90° after retreat. Check any separately planned straight pull-to-push base handoff
+  in the same clearance envelope. Log prompts, arrival pose, route, correction count, minimum
+  clearances, final pose, camera agreement and button-to-90° time. On refusal, clear the cause and repark.
+  After repeatable empty-chair passes and verified occupant envelopes, repeat the no-correction case with a rider
+  and stop operator, then one small correction. Stop for any clearance, feedback or braking failure.
+
+## 7. Fast profile and save the session
+
+- [ ] Dry-run `profile: fast` from the verified mark. Then use the same attended fixed-base ladder as Standard.
+  Increase arm speed only through verified steps. If qualified, repeat with the checked dock using an explicit
+  goal (`drive_base: true, base_moves: true`). Log the release, first push and post-retreat angle. Require repeated
+  physically measured ≥90° after retreat and clean clearances before comparing paired Standard/Fast timings at
+  the same settings. Revert to the verified Standard setup if Fast alters the result. UI buttons at this revision
+  select Standard. Use explicit `profile` goals for timed Fast and Hook tests.
+- [ ] Save the config, survey, angle video and per-run result, first failed stage and timing. Copy
+  `/tmp/fridge_data/` (especially `runs/*/console.log`, bags and detections) before reboot. Record extra telemetry
+  on the same clock, including `/base/odom`, `/base/setpoint/twist`, `/rammp/mib/status`, `/control_status`,
+  `/gripper_state`, `/ee_state` and `/contact_monitor/residual` when enabled. Record goal receipt, prompt
+  acknowledgement, first 90°, retreat completion and final physical angle separately.

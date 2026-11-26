@@ -41,6 +41,7 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from scipy.spatial.transform import Rotation as R
 
+from . import timing
 from .common import say
 
 TF_TIMEOUT_S = 2.0  # wait this long for base <- camera at the frame's stamp, then use the latest
@@ -74,6 +75,8 @@ class WristCamera:
         sam3_prompts=("handle",),
         sam3_threshold=0.3,
         box2d_topic="",
+        *,
+        checkpoint=None,
     ):
         """`camera_frame` "" = the colour image's own frame_id. Depth must be aligned to colour.
         `box_topic`: boxer's 3D boxes (rammp_perception_interfaces/ObjectDetections, from the scene camera); each
@@ -97,9 +100,11 @@ class WristCamera:
         self.node, self.base_frame, self.camera_frame = node, base_frame, camera_frame
         self.box_topic, self.box_class = box_topic, box_class
         self.color_topic, self.sam3_prompts, self.sam3_threshold = color_topic, list(sam3_prompts), sam3_threshold
+        self._checkpoint = checkpoint
         self._bridge = CvBridge()
         self._lock = threading.Lock()
         self._latest = None
+        self._after_s = None
         self._recent = collections.deque()  # with SAM 3: (colour, info, depth) of the last FRAME_KEEP_S, oldest first
         self._sam3 = sam3  # before the subscriptions: _on_frame reads it
         self._box = None  # (header, DetectedObject): the latest box_class object with a pose
@@ -130,6 +135,11 @@ class WristCamera:
 
     def _on_frame(self, color, info, depth):
         with self._lock:
+            if (
+                self._after_s is not None
+                and min(_stamp_s(color.header.stamp), _stamp_s(depth.header.stamp)) <= self._after_s
+            ):
+                return
             self._latest = (color, info, depth)
             if self._sam3 is None:  # only SAM 3's masks need an older frame
                 return
@@ -188,33 +198,47 @@ class WristCamera:
         """SAM 3 on this camera's colour image: (instances as sam3_handle_instances, the RGB-D frame they are masks
         of, as `grab` returns it). SAM 3 segments the newest image on the topic when the request reaches it, not a
         frame grabbed before asking, so the frame is the buffered one with the reply's stamp. ([], None) (says why)
-        without a service, a reply, an instance, or that frame still buffered."""
+        without a service, a reply, or that frame still buffered. ([], frame) for a synchronized empty reply."""
         if self._sam3 is None:
             return [], None
-        if not self._sam3.wait_for_service(timeout_sec=2.0):
+        with timing.span("sam3_service_wait"):
+            service_ready = self._sam3.wait_for_service(timeout_sec=2.0)
+        if not service_ready:
             say(f"  no SAM 3 service {self._sam3.srv_name} (is the sam3 node up?)")
             return [], None
         req = self._sam3.srv_type.Request(
             prompts=self.sam3_prompts, image_topic=self.color_topic, score_threshold=float(self.sam3_threshold)
         )
-        done, fut = threading.Event(), self._sam3.call_async(req)
-        fut.add_done_callback(lambda _: done.set())
-        if not done.wait(SAM3_TIMEOUT_S):
-            say(f"  SAM 3 did not answer in {SAM3_TIMEOUT_S:g} s")
-            return [], None
-        resp = fut.result()
+        with timing.span("sam3"):
+            done, fut = threading.Event(), self._sam3.call_async(req)
+            fut.add_done_callback(lambda _: done.set())
+            deadline = time.monotonic() + SAM3_TIMEOUT_S
+            try:
+                while not done.is_set():
+                    if self._checkpoint is not None:
+                        self._checkpoint()
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        say(f"  SAM 3 did not answer in {SAM3_TIMEOUT_S:g} s")
+                        return [], None
+                    done.wait(min(0.1, left))
+            finally:
+                if not done.is_set():
+                    fut.cancel()
+            resp = fut.result()
         if not resp.success:
             say(f"  SAM 3: {resp.message}")
             return [], None
         objs = sorted((o for o in resp.detections.objects if o.mask_id > 0), key=lambda o: -o.score)
-        if not objs:
-            say(f"  SAM 3 found no {' / '.join(self.sam3_prompts)} ({resp.message})")
-            return [], None
-        frame = self.frame_at(resp.detections.header.stamp)
+        with timing.span("capture"):
+            frame = self.frame_at(resp.detections.header.stamp)
         if frame is None:
             stamp = _stamp_s(resp.detections.header.stamp)
             say(f"  SAM 3's image ({stamp:.3f}) is not among the buffered RGB-D frames (dropped by the sync, or old)")
             return [], None
+        if not objs:
+            say(f"  SAM 3 found no {' / '.join(self.sam3_prompts)} ({resp.message})")
+            return [], frame
         li = resp.detections.label_image
         if (li.height, li.width) != frame["rgb"].shape[:2]:
             say(f"  SAM 3's mask is {li.width}x{li.height}, the frame {frame['rgb'].shape[1]}x{frame['rgb'].shape[0]}")
@@ -249,9 +273,18 @@ class WristCamera:
             "score": float(obj.score),
         }
 
+    def require_frames_after_now(self):
+        """Invalidate cached RGB-D and accept only images captured after this call."""
+        with self._lock:
+            self._after_s = self.node.get_clock().now().nanoseconds / 1e9
+            self._latest = None
+            self._recent.clear()
+
     def wait_for_frames(self, timeout_s=10.0):
         t0 = time.time()
         while time.time() - t0 < timeout_s:
+            if self._checkpoint is not None:
+                self._checkpoint()
             with self._lock:
                 if self._latest is not None:
                     return True
@@ -277,6 +310,7 @@ class WristCamera:
             return m
         return None
 
+    @timing.timed("capture")
     def grab(self, timeout_s=10.0):
         """The latest frame: {rgb (bgr8), depth_mm (float32), K (3x3), base_T_cam (4x4 or None), time,
         frame_id, box (appliance_box(), or None without a box_topic)}. Raises RuntimeError if no frame has come in

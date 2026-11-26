@@ -13,9 +13,9 @@ import pytest
 from door_common import common as dc
 from fridge import base_drive, close_door, constants, open_door, push_open
 from fridge_fake import (  # noqa: F401 -- fridge: the fixture
-    door_is_open,
     door_where_it_stands,
     fridge,
+    unshifted_push_blocked,
 )
 
 from capability_engine import BaseError, StateTimeout
@@ -290,14 +290,8 @@ def _driver(clock, arm, fail_at_s=None):
     return base, partial(base_drive.move_chair, base, arm, ctx, speed=0.05, cfg=CFG, execute=True)
 
 
-def _needs_a_move(pos, quat, obstacles):
-    """cuRobo reaches nothing near the open door where it stands: only once the wheelchair has
-    moved."""
-    return isinstance(obstacles, list) and door_is_open(obstacles)
-
-
 def _needs_a_close_move(pos, quat, obstacles):
-    """_needs_a_move for the close, which also plans against the door shifted by a move under the
+    """A blocked close goal when the door is in its current position. The close also plans under the
     same box names (its after-move check): blocked only by the door where it stands, by its
     position."""
     return isinstance(obstacles, list) and door_where_it_stands(obstacles)
@@ -305,7 +299,7 @@ def _needs_a_close_move(pos, quat, obstacles):
 
 def test_the_open_drives_the_base_for_the_push_and_pushes_in_one_goal(fridge, clock, monkeypatch):
     arm, planner, _ = fridge
-    arm.unreachable = _needs_a_move
+    arm.unreachable = unshifted_push_blocked
     base, drive = _driver(clock, arm)
     assert open_door.run(
         arm, planner, False, drive_chair=drive
@@ -340,7 +334,7 @@ def test_the_open_drives_the_base_for_the_push_and_pushes_in_one_goal(fridge, cl
 
 def test_an_open_whose_drive_stops_leaves_no_push_waiting(fridge, clock):
     arm, planner, _ = fridge
-    arm.unreachable = _needs_a_move
+    arm.unreachable = unshifted_push_blocked
     base, drive = _driver(clock, arm, fail_at_s=0.5)
     with pytest.raises(BaseError):
         open_door.run(arm, planner, True, drive_chair=drive)

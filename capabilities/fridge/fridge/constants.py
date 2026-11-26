@@ -10,10 +10,8 @@ INCH = 0.0254
 
 # --- measured on the fridge being opened (per fridge: the node's parameters) ---
 MEASURED = {
-    # the detected handle point -> door's front surface, perpendicular to the door: the door's face, its inside and
-    # the hinge are placed from the handle by it. Measured 11-06: the bar's back edge 2.5 in from the face, the bar
-    # ~0.5 in deep (front ~3.0 in). Still 0.070 (the STL's bar middle) until the camera's handle point is measured
-    # against the bar's real front (docs/TESTING.md, "Before the next run")
+    # The fitted Handle5 front anchor is about 70 mm out from the door face. Its section center is about
+    # 60.6 mm out. Keep the front-anchor datum for perception, the hinge estimate and saved door geometry.
     "handle_centre_to_face_m": 0.070,
     # door's front surface -> hinge pin axis. The open only uses it added to handle_centre_to_face_m: the hinge is
     # that sum into the door from the detected handle point. The new fridge, from the swing's arc fit 11-19
@@ -37,7 +35,12 @@ MEASURED = {
     # the handle bar's grippable straight length, between its mounts: 8 in, measured on the fridge (11-06). It limits
     # how far above or below the middle of the bar the open may grasp (GRASP_END_MARGIN_M)
     "handle_length_m": 8 * INCH,
-    "body_depth_m": 0.50,  # cabinet behind the door
+    # cabinet behind the door slab: 18 in overall front to back (listing; user 11-25) less the slab in front
+    "body_depth_m": 18 * INCH - 4.2 * INCH,
+    "body_width_m": 19 * INCH,
+    "body_height_m": 33 * INCH,
+    "support_height_m": 0.50,  # appliance sits on the support cabinet
+    "support_floor_z_m": -0.502,  # floor in the Gen1.5 arm_mount frame
     # LEVEL MOUNT ONLY (dojo, which has no wheelchair model): no part of the arm or gripper may be more than this far
     # behind the arm base (arm-base x) while on its right (y < 0) -- the stand-in for the chair (10-24: a close ran the
     # arm into the back of the chair; user: ~8 in estimated, then 12, then 15). On the 30-deg mount the wheelchair and
@@ -60,45 +63,22 @@ START_JOINTS_DEG = (
 # 20261112_194816_open, flatbot); was the web app's Fridge pose (98.8, 10.2, 179.5, -94.7, 98.7, 100.2, 16.1)
 START_REACHED_DEG = 2.0  # every joint already this close (self.arm's GO_TO_TRACK_DEG): nothing moves
 
-# --- grasp: the microwave's corrections on the Jetson rig, the values every fridge run so far used (10-22, 10-24: the
-# door files' handle-to-grasp is 4.8 cm); nothing has checked them on this handle ---
-# along the approach axis (negative = past the detected handle). 11-05: the microwave's 0.088 grabbed too deep on
-# the fridge handle -> 3.8 cm (1.5 in) shallower
-# 11-09: 0.126 stopped the fingertips 3-4.6 cm SHORT of the bar (both executed runs missed it). Measured: the
-# fingertip ends are 4.3 cm past arm_tool_frame (robotiq finger_tip mesh reaches 5.1 cm past the tip link, which is
-# 0.8 cm behind the tool frame), not door_common's FINGERTIP_PAST_TOOL 6.2 cm; the detected bar front was right
-# to <0.5 cm (fingers teleoped onto it: /fridge_data/true_handle_20261109.json). A level grasp now puts the
-# fingertips 3 cm past the bar's front (tool = bar front - 1.3 cm). Backup constants.py.bak_20261109.
-# 11-13: - 0.014 for the sensor puck (rammp-deployments af2396b, #149): the puck was on the arm when 0.053 was
-# tuned, but the model put arm_tool_frame 0.120 m past the flange, so every grasp went 14 mm deeper than planned
-# and 0.053 held back those 14 mm. The model now has arm_tool_frame at 0.134 m and parks the flange 14 mm further
-# back by itself, so 0.053 would grasp 14 mm shallower than the grasp that worked: take the 14 mm out again.
-GRIP_EXT = 0.053 - 0.014
+# The shipped Handle5 STL's straight section, measured from its fitted outer-face anchor.
+HANDLE_BAR_FRONT_DEPTH_M = 0.00006
+HANDLE_BAR_REAR_DEPTH_M = 0.01874
+HANDLE_BAR_WIDTH_M = 0.0254
+HANDLE_BAR_CENTER_DEPTH_M = (HANDLE_BAR_FRONT_DEPTH_M + HANDLE_BAR_REAR_DEPTH_M) / 2
 VERTICAL_CORR = 0.0  # world z
-GRASP_X_ADJUST = 0.040  # along the approach axis
 GRASP_FORCE = 0.5  # a normal close (the microwave's 0.25 is loosened on purpose, to let its bar turn)
 # the open's grasp_offset_m (up from the middle of the bar) keeps the middle of the finger pads at least this far in
 # from either end of handle_length_m: half the 2F-85 pad's ~2.2 cm width, plus ~2 cm for the detected middle being off
 GRASP_END_MARGIN_M = 0.03
 
-# --- which grasp the open uses (the node's `grasp` parameter; configure sets GRASP): "side" (side_grasp.py, this
-# branch's default: in along the door from the hinge side, one finger behind the bar) or "front" (fingers across the
-# bar, straight in from in front of it: feature/15-fridge's). Everything after the grasp is the same code ---
-GRASPS = ("side", "front")
-GRASP = "side"
-# --- the side grasp (side_grasp.py). Its pads' place is the one that ran on the arm on 11-06 (89504f3's
-# side_grasp_poses, with the then GRIP_EXT 0.126 - GRASP_X_ADJUST 0.040 - GRASP_PADS_PAST_TOOL 0.042 - SIDE_DEEPER_M
-# 0.055), written out because GRIP_EXT has changed since (the front grasp's, 11-09). It was found with the SCENE
-# camera's handle point; the wrist camera's (detect_camera wrist, the default) is unchecked for it: watch where the
-# fingers close ---
-SIDE_INSERT_DEG = 70.0  # the hand slides in this far off the door normal: 20 deg off the face, from in front of it
-# the pads' line: this far behind the detected handle point, into the door ... 0.011 until 11-20: on the new fridge the
-# back finger touched the handle's mounting plate a little (the handle point came out 2-3 cm behind the bar's front
-# when SAM 3's mask took in the plate: runs/20261121_000438_open, _001341_open); 5 mm less, the grasp otherwise as
-# tuned on 11-06
-SIDE_PADS_INTO_M = 0.006
-SIDE_PADS_PAST_BAR_M = 0.05  # ... and the pads this far further along the approach (11-06: 17 cm in from a waypoint
-# 12 cm short of the bar: the fingers wrap the bar deep in the hand)
+# The automatic policy tries front and side grasps for the default push-open.
+GRASPS = ("auto", "side", "front")
+GRASP = "auto"
+# The hand slides along the door, angled 20 degrees into it, and closes across the printed section.
+SIDE_INSERT_DEG = 70.0
 SIDE_TILTS_DEG = (0, -10, 10, -20, 20, -30, 30, -40, 40)  # nose-down (+) / nose-up (-) tilts about the finger axis,
 # tried in this order -- level first (what ran on the arm), then out to +-40 (user, 11-10). The pads stay put
 SIDE_SLIDE_M = (0.15, 0.12, 0.09)  # line up this far straight back along the (level) approach from the grasp, then
@@ -157,8 +137,8 @@ SWING_DEG = 90  # the full pull (push_open false) without a swing_deg. Exactly t
 # fallback
 
 # --- how the open moves (the side grasp's 11-06 hardware runs, side_run/; run_general.py): the swing held compliant,
-# the gripper closing as the pull starts, the swing stopping at its angle, then the gripper opening, everything after
-# the release one motion ---
+# the gripper confirmed closed before the pull, the swing stopping at its angle, then the gripper opening. The motion
+# after release also runs under impedance. ---
 PULL_GAINS = {  # joint impedance (kinova-gen3-driver gains.h: kq <= 400 N m/rad, torque_limit <= the URDF's effort
     # limits), critically damped: the swing and everything after the release run under it. The shoulder and elbow
     # (j1-j4) at the driver's stiffest, to carry the door; the wrist (j5-j7) at the driver's own stiff profile, 60. At
@@ -196,6 +176,7 @@ SWING_ANGLE_TOL_DEG = 5.0  # the door's angle at the end, from the hand: at most
 # door's direction detected ~12 deg off -- and the open stopped holding the handle. Under this angle the door is too
 # little open for what follows (planned and run from ~60): it stops holding the handle, as before
 SWING_REPLAN_MIN_DEG = 45.0
+SWING_RECOVERY_MAX_ERROR_M = 0.05
 # The hinge from the swing itself: the hand clamped on the handle traces the door's real arc, so a circle fitted to the
 # tool's path (sampled at HINGE_FIT_HZ while the gripper is closed) is the hinge -- written to the door file for what
 # follows (the push-open, the close). The detected hinge is handle + a measured offset, and the handle's estimate moves
@@ -207,8 +188,13 @@ HINGE_FIT_MIN_DEG = 20.0  # used only over at least this much of the swing ...
 HINGE_FIT_MAX_RMS_M = 0.01  # ... the path this close to a circle (11-13: 7.3 mm with the gripper closed to 0.97, 2.1
 # mm holding the bar at 0.68) ...
 HINGE_FIT_MAX_SHIFT_M = 0.08  # ... and the fit this close to the estimate: further, the hand slipped or the fit is off
-GRIP_DURING_SWING = True  # the gripper closes on the bar as the swing starts (the 2F-85 takes ~1 s), no stop on the
-# handle; False: it closes first, then the swing
+# Closure position maps to an estimated aperture across the 85 mm stroke.
+# The printed bar is about 25 mm across (15–19 mm front-to-back).
+GRIPPER_STROKE_M = 0.085
+GRASP_GAP_MIN_M = 0.010
+GRASP_GAP_MAX_M = 0.042
+# One alternate bite after an empty close, still inside the straight section with room on both sides.
+GRASP_RETRY_OUT_M = 0.003
 # the release (user, 11-09): the swing comes to a STOP at exactly swing_deg, the gripper then opens with the hand still
 # (confirmed open before anything else moves) -- the hand never pulls the door on past the angle asked for. Until 11-09
 # the pull ran on 8 deg further while the gripper opened (RELEASE_ARC_DEG): the door ended ~68 deg on a 60 deg pull,
@@ -228,14 +214,24 @@ AROUND_OUT_M = 0.15  # ... and at least this far off the door's mid-plane, on it
 AROUND_END_M = (0.25, 0.30)  # the end: this far from the hinge along the door, this far off its inside, facing the
 # fridge, upright: beside the open door, in front of the fridge opening
 
+# Horizontal slab allowance for the calibrated fridge: v2 search A's preflight hinge XY error p99
+# was 21.2 mm. Round up to 30 mm for an 8.8 mm buffer.
+DOOR_SWEEP_HINGE_MARGIN_M = 0.030
+
 # --- the push-open, the open's default (push_open.py): pull part way holding the handle, let go, push the door the
 # rest of the way with the side of the hand: in behind the door, fingers along it toward the hinge, rolled vertical
 # (facing the hand into the cabinet puts the gripper through the door). cuRobo routes from the back-off to the push
 # start round the open door (a point past its free edge only if it finds no route), then onto the inner face and round
 PUSH_OPEN_PULL_DEG = 60  # the pull. 11-05 sim sweep (PyBullet planner): 60 gave the most chair placements where the
 # open and the close plan; kept for cuRobo until it is swept again
-PUSH_OPEN_TO_DEG = 90  # push the door on to this
+PUSH_OPEN_TO_DEG = 90  # maximum push target
+PUSH_OPEN_MIN_FINAL_DEG = 90  # minimum opening required for the demo
 PUSH_OPEN_MIN_PUSH_DEG = 5  # ... at least this far past the pull: the pull is at most PUSH_OPEN_TO_DEG - this
+# A larger displacement of the hinge or the release edge requires a fresh
+# push plan. The intentional contact preload is itself only one centimetre.
+PUSH_RELEASE_REUSE_M = 0.010
+# A parallel hand contacts the slab on the free-edge side of the tool.
+PUSH_PARALLEL_EDGE_INSET_M = 0.09
 PUSH_OPEN_EDGE_CLEAR_M = 0.16  # the point past the free edge (tool point), when cuRobo needs one
 PUSH_OPEN_GAP_M = 0.10  # the push start: this far off the door's inner face (tool point) ...
 PUSH_OPEN_DZ_M = -0.10  # ... this far above the handle's height (negative: below; configure sets it from MOUNTS) ...
@@ -518,7 +514,7 @@ UI_NOTICE_TIMEOUT_S = 30.0
 UI_PROMPT_TIMEOUT_S = 600.0
 
 
-def configure(data_dir, mount_tilt_deg=0, grasp="side"):
+def configure(data_dir, mount_tilt_deg=0, grasp="auto"):
     """Point door_common's paths at `data_dir`, name the appliance and pick the mount's and the grasp's placement. No
     door-size defaults: every fridge door file carries its own (open_door.configure's DOOR_MODEL)."""
     global PLACEMENT_X, PLACEMENT_Y, PLACEMENT_CELLS, CELLS_NEEDING_BASE_MOVE, PUSH_OPEN_DZ_M, GRASP_PITCHES_DEG, GRASP

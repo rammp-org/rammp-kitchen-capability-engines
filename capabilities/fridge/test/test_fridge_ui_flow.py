@@ -372,7 +372,7 @@ class DriveFlow(Flow):
         super().__init__(**kw)
         self.drives, self.panels_while_driving = [], []
 
-        def move_chair(base, arm, ctx, move, *, speed, cfg, execute):
+        def move_chair(base, arm, ctx, move, *, speed, cfg, execute, mode_entered=False, keep_heading=False):
             self.drives.append({"move": move, "speed": speed, "execute": execute})
             self.panels_while_driving.append(ctx.sent[-1] if ctx.sent else None)
             if during is not None:
@@ -389,15 +389,23 @@ class DriveFlow(Flow):
         scope = load(
             NODE,
             UI_NAMES,
-            UI_METHODS | {"execute", "_execute"},
+            UI_METHODS | {"execute", "_execute", "_execute_action"},
             **{k: v for k, v in self.scope.items() if k != "__builtins__"},
         )
+        from door_common import timing
+
+        scope["timing"] = timing
         scope["constants"].CLOSE_SPEED, scope["constants"].PLAN_BUDGET_S = 0.7, 1.0
         scope.update(
             base_drive=types.SimpleNamespace(
                 SPEED_DEFAULT=0.05, PARAMS=(), check=lambda base, arm: None, move_chair=move_chair
             ),
             BaseError=type("BaseError", (Exception,), {}),
+            SweepBlocked=type("SweepBlocked", (Exception,), {}),
+            open_door=types.SimpleNamespace(
+                Infeasible=type("Infeasible", (Exception,), {}),
+                StagingRequired=type("StagingRequired", (Exception,), {}),
+            ),
             Planner=lambda *a, **k: None,
             WristCamera=lambda *a, **k: None,
             dc=types.SimpleNamespace(
@@ -650,7 +658,7 @@ def test_each_button_needs_the_door_its_action_starts_from(opened, offered):
     node = DOOR["Capability"]()
     why = {a: node._ui_unavailable(a, "fridge_1", _world(opened)) for a in DOOR["UI_ACTIONS"]}
     assert {a for a, w in why.items() if not w} == offered
-    for a, w in why.items():
+    for _a, w in why.items():
         if w:
             assert w == ("The fridge door is already open." if opened else "The fridge door is already closed.")
 
@@ -659,3 +667,20 @@ def test_no_object_record_or_a_non_bool_opened_is_no_objection():
     node = DOOR["Capability"]()
     for world in ({}, {"objects": {}}, {"objects": {"fridge_1": None}}, _world("yes")):
         assert all(not node._ui_unavailable(a, "fridge_1", world) for a in DOOR["UI_ACTIONS"])
+
+
+@pytest.mark.parametrize("button", ["go_to_start_ui", "open_door_drive_ui"])
+def test_surveyed_mark_requires_confirmation_before_motion(button):
+    f = Flow(OK, answers=("continue", "done"))
+    parking = "Drive to the E mark."
+    f.node.cfg.update(guided_docking_enabled=True, guided_parking_instruction=parking)
+    assert f.press(button) == OK
+    assert f.ctx.messages()[0] == f"{parking} Stop the wheelchair, then press Continue."
+    assert len(f.calls) == 1
+
+    disconnected = Flow(OK, session=False)
+    disconnected.node.cfg.update(guided_docking_enabled=True, guided_parking_instruction=parking)
+    with pytest.raises(EngineError) as refusal:
+        disconnected.press(button)
+    assert refusal.value.error_code == "parking_required"
+    assert disconnected.calls == []

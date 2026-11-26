@@ -71,6 +71,20 @@ class Chain:
                 self.lower[k], self.upper[k] = float(lim.get("lower")), float(lim.get("upper"))
                 self.limited[k] = True
 
+    def wrist_equivalents(self, joints):
+        """Equivalent J5/J7 representations allowed by the planner's joint guard."""
+        options = [np.array(joints, dtype=float)]
+        for joint in (4, 6):
+            if self.limited[joint]:
+                continue
+            for q in tuple(options):
+                for turn in (-2 * np.pi, 2 * np.pi):
+                    alternate = q.copy()
+                    alternate[joint] += turn
+                    if self.lower[joint] + LIMIT_MARGIN_RAD <= alternate[joint] <= self.upper[joint] - LIMIT_MARGIN_RAD:
+                        options.append(alternate)
+        return options
+
     def poses(self, qs):
         """Tool poses for joint configurations `qs` ((N, 7) or (7,)): (positions (N, 3), quaternions xyzw (N, 4))."""
         qs = np.atleast_2d(np.asarray(qs, float))

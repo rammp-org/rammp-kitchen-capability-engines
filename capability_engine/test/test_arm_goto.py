@@ -174,6 +174,23 @@ def test_gripper_streams_until_settled(arm_env):
         assert bytes(m.token) == TOKEN
 
 
+def test_opening_gripper_returns_at_clearance(arm_env):
+    arm, _, fake = arm_env
+    fake.set_gripper(1.0)
+    arm.begin_action(FakeCtx(), TOKEN)
+    assert arm.gripper_state().position == 1.0
+    fake.move_gripper_to(0.0, 1.0)
+    assert arm.gripper(0.0, open_threshold=0.2) is True
+    assert 0 < arm.gripper_state().position <= 0.2
+
+
+def test_opening_gripper_reports_missing_clearance(arm_env):
+    arm, _, fake = arm_env
+    fake.set_gripper(1.0)
+    arm.begin_action(FakeCtx(), TOKEN)
+    assert arm.gripper(0.0, timeout_s=0.1, open_threshold=0.2) is False
+
+
 def test_gripper_cancel_raises(arm_env):
     arm, _, _ = arm_env
     ctx = FakeCtx()

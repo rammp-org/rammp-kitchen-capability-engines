@@ -59,6 +59,20 @@ def door_is_open(obstacles):
     return abs(by["door"]["rpy_deg"][2] - by["body"]["rpy_deg"][2]) > 1.0
 
 
+def unshifted_push_blocked(pos, quat, obstacles):
+    """Reject the push entry behind the live door while allowing the pull and release."""
+    if not isinstance(obstacles, list) or not door_is_open(obstacles):
+        return False
+    boxes = {box["name"]: np.asarray(box["position"]) for box in obstacles}
+    front = boxes["handle"][:2] - boxes["door"][:2]
+    # The bar is offset toward the free edge as well as in front of the slab.
+    yaw = next(box for box in obstacles if box["name"] == "door")["rpy_deg"][2]
+    radians = np.radians(yaw)
+    normal = np.array([np.cos(radians), np.sin(radians)])
+    normal *= np.sign(front @ normal)
+    return bool((np.asarray(pos)[:2] - boxes["door"][:2]) @ normal < 0)
+
+
 def door_where_it_stands(obstacles):
     """True when `obstacles` holds the open door where the door file puts it: not shifted by a
     wheelchair move. The close plans against the door shifted by a move under the same box names
@@ -109,7 +123,7 @@ class FakeCurobo:
         t, q, qd = planning.timed(np.asarray(start, float), np.asarray([q_goal], float))
         return Plan(True, "", t, q, qd)
 
-    def plan_to_pose(self, pos, quat, start_joints, hold=0):
+    def plan_to_pose(self, pos, quat, start_joints, hold=0, *, deadline=None):
         obstacles = self.worlds[-1] if self.worlds else []
         self.pose_goals.append((np.asarray(pos, float), obstacles))
         if self.start_blocked:
@@ -135,7 +149,9 @@ class FakeCurobo:
         q, _ = self.fk.ik(pos, quat, start_joints)
         return Plan(False, IK_FAIL) if q is None else self._to(start_joints, q)
 
-    def plan_to_joints(self, q_goal, start_joints):
+    def plan_to_joints(self, q_goal, start_joints, *, deadline=None):
+        if np.array_equal(q_goal, start_joints) and not self.start_blocked:
+            return self._to(start_joints, q_goal)
         # cuRobo checks a joint goal's start and the goal itself in its world as it does a pose
         # goal's: the same hooks (a test's unreachable / start_blocked, or its own plan_to_pose
         # standing in for cuRobo) apply
@@ -154,7 +170,16 @@ class FakeCurobo:
             return Plan(False, IK_FAIL)
         return self._to(start_joints, q_goal)
 
-    def blend(self, legs, blend_radius, speed_scale=None, hold=None, hold_orientation=None):
+    def blend(
+        self,
+        legs,
+        blend_radius,
+        speed_scale=None,
+        hold=None,
+        hold_orientation=None,
+        *,
+        deadline=None,
+    ):
         legs = list(legs)
         self.blends.append((len(legs), list(blend_radius), speed_scale, hold))
         if self.blend_fails:
@@ -165,7 +190,7 @@ class FakeCurobo:
         qd[0] = qd[-1] = 0.0
         return Plan(True, "", t, q, qd, corner_m=np.zeros(len(legs) - 1))
 
-    def set_world(self, name, even_if_cancelled=False):
+    def set_world(self, name, even_if_cancelled=False, *, deadline=None):
         self.world_calls.append((name, even_if_cancelled))
         path = Path(name)
         self.worlds.append(

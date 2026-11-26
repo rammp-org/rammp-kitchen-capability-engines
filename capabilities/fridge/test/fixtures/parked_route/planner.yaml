@@ -1,0 +1,2 @@
+robot: robot.yaml
+layers: [layer_mebot_seat.yaml, layer_mebot_person.yaml]

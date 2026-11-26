@@ -19,7 +19,11 @@ from capability_ui import DONE, STOP, STOPPED_MESSAGE, panel_open
 from door_common import common as dc
 from fridge import close_door, constants, open_door, push_open, ui_text
 from fridge import constants as F
-from fridge_fake import door_is_open, fridge  # noqa: F401 -- fridge: the fake-planner fixture
+from fridge_fake import (  # noqa: F401 -- fridge: the fake-planner fixture
+    door_is_open,
+    fridge,
+    unshifted_push_blocked,
+)
 
 from capability_engine import Cancelled, EngineError
 
@@ -622,9 +626,7 @@ def test_an_executed_close_refuses_naming_its_move_and_continue_closes(fridge): 
 
 def test_an_executed_open_that_needs_a_move_reports_it_in_next_move(fridge):  # noqa: F811
     arm, planner, _ = fridge
-    arm.unreachable = lambda pos, quat, obstacles: (
-        isinstance(obstacles, list) and door_is_open(obstacles)
-    )
+    arm.unreachable = unshifted_push_blocked
     assert open_door.run(arm, planner, True)  # the pull, off the handle, then it asks
     move = open_door.LAST_PLAN["after"].chair_move
     assert move and push_open.NEXT_MOVE == pytest.approx(move)

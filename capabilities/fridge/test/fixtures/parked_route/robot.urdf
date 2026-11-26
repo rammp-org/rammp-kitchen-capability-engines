@@ -1,0 +1,155 @@
+<robot name="kinova_gen3">
+  <link name="arm_mount" />
+  <joint name="arm_base_joint" type="fixed">
+    <origin rpy="0.0 0.5235987755982988 0.0" xyz="0 0 0" />
+    <parent link="arm_mount" />
+    <child link="arm_base_link" />
+  </joint>
+  <link name="arm_base_link" />
+  <link name="arm_shoulder_link" />
+  <joint name="arm_joint_1" type="continuous">
+    <origin rpy="3.1416 2.7629E-18 -4.9305E-36" xyz="0 0 0.15643" />
+    <parent link="arm_base_link" />
+    <child link="arm_shoulder_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="39" velocity="1.3963" />
+  </joint>
+  <link name="arm_half_arm_1_link" />
+  <joint name="arm_joint_2" type="revolute">
+    <origin rpy="1.5708 2.1343E-17 -1.1102E-16" xyz="0 0.005375 -0.12838" />
+    <parent link="arm_shoulder_link" />
+    <child link="arm_half_arm_1_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="39.0" lower="-2.24" upper="2.24" velocity="1.3963" />
+  </joint>
+  <link name="arm_half_arm_2_link" />
+  <joint name="arm_joint_3" type="continuous">
+    <origin rpy="-1.5708 1.2326E-32 -2.9122E-16" xyz="0 -0.21038 -0.006375" />
+    <parent link="arm_half_arm_1_link" />
+    <child link="arm_half_arm_2_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="39" velocity="1.3963" />
+  </joint>
+  <link name="arm_forearm_link" />
+  <joint name="arm_joint_4" type="revolute">
+    <origin rpy="1.5708 -6.6954E-17 -1.6653E-16" xyz="0 0.006375 -0.21038" />
+    <parent link="arm_half_arm_2_link" />
+    <child link="arm_forearm_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="39.0" lower="-2.57" upper="2.57" velocity="1.3963" />
+  </joint>
+  <link name="arm_spherical_wrist_1_link" />
+  <joint name="arm_joint_5" type="continuous">
+    <origin rpy="-1.5708 2.2204E-16 -6.373E-17" xyz="0 -0.20843 -0.006375" />
+    <parent link="arm_forearm_link" />
+    <child link="arm_spherical_wrist_1_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="9" velocity="1.2218" />
+  </joint>
+  <link name="arm_spherical_wrist_2_link" />
+  <joint name="arm_joint_6" type="revolute">
+    <origin rpy="1.5708 9.2076E-28 -8.2157E-15" xyz="0 0.00017505 -0.10593" />
+    <parent link="arm_spherical_wrist_1_link" />
+    <child link="arm_spherical_wrist_2_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="9.0" lower="-2.09" upper="2.09" velocity="1.2218" />
+  </joint>
+  <link name="arm_bracelet_link" />
+  <joint name="arm_joint_7" type="continuous">
+    <origin rpy="-1.5708 -5.5511E-17 9.6396E-17" xyz="0 -0.10593 -0.00017505" />
+    <parent link="arm_spherical_wrist_2_link" />
+    <child link="arm_bracelet_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="9" velocity="1.2218" />
+  </joint>
+  <link name="arm_end_effector_link" />
+  <joint name="arm_end_effector" type="fixed">
+    <origin rpy="3.14159265358979 1.09937075168372E-32 0" xyz="0 0 -0.0615250000000001" />
+    <parent link="arm_bracelet_link" />
+    <child link="arm_end_effector_link" />
+    <axis xyz="0 0 0" />
+  </joint>
+  <link name="arm_tool_frame" />
+  <link name="arm_robotiq_85_base_link" />
+  <link name="arm_robotiq_85_left_knuckle_link" />
+  <link name="arm_robotiq_85_right_knuckle_link" />
+  <link name="arm_robotiq_85_left_finger_link" />
+  <link name="arm_robotiq_85_right_finger_link" />
+  <link name="arm_robotiq_85_left_inner_knuckle_link" />
+  <link name="arm_robotiq_85_right_inner_knuckle_link" />
+  <link name="arm_robotiq_85_left_finger_tip_link" />
+  <link name="arm_robotiq_85_right_finger_tip_link" />
+  <joint name="arm_robotiq_85_left_knuckle_joint" type="revolute">
+    <parent link="arm_robotiq_85_base_link" />
+    <child link="arm_robotiq_85_left_knuckle_link" />
+    <axis xyz="0 -1 0" />
+    <origin rpy="0 0 0" xyz="0.03060114 0.0 0.05490452" />
+    <limit effort="50.0" lower="0.0" upper="0.8" velocity="0.5" />
+  </joint>
+  <joint name="arm_robotiq_85_right_knuckle_joint" type="revolute">
+    <parent link="arm_robotiq_85_base_link" />
+    <child link="arm_robotiq_85_right_knuckle_link" />
+    <axis xyz="0 -1 0" />
+    <origin rpy="0 0 0" xyz="-0.03060114 0.0 0.05490452" />
+    <limit effort="50.0" lower="-0.8" upper="0.0" velocity="0.5" />
+    <mimic joint="arm_robotiq_85_left_knuckle_joint" multiplier="-1" />
+  </joint>
+  <joint name="arm_robotiq_85_left_finger_joint" type="fixed">
+    <parent link="arm_robotiq_85_left_knuckle_link" />
+    <child link="arm_robotiq_85_left_finger_link" />
+    <origin rpy="0 0 0" xyz="0.03152616 0.0 -0.00376347" />
+  </joint>
+  <joint name="arm_robotiq_85_right_finger_joint" type="fixed">
+    <parent link="arm_robotiq_85_right_knuckle_link" />
+    <child link="arm_robotiq_85_right_finger_link" />
+    <origin rpy="0 0 0" xyz="-0.03152616 0.0 -0.00376347" />
+  </joint>
+  <joint name="arm_robotiq_85_left_inner_knuckle_joint" type="continuous">
+    <parent link="arm_robotiq_85_base_link" />
+    <child link="arm_robotiq_85_left_inner_knuckle_link" />
+    <axis xyz="0 -1 0" />
+    <origin rpy="0 0 0" xyz="0.0127 0.0 0.06142" />
+    <mimic joint="arm_robotiq_85_left_knuckle_joint" />
+    <limit effort="50.0" lower="0.0" upper="0.8" velocity="0.5" />
+  </joint>
+  <joint name="arm_robotiq_85_right_inner_knuckle_joint" type="continuous">
+    <parent link="arm_robotiq_85_base_link" />
+    <child link="arm_robotiq_85_right_inner_knuckle_link" />
+    <axis xyz="0 -1 0" />
+    <origin rpy="0 0 0" xyz="-0.0127 0.0 0.06142" />
+    <mimic joint="arm_robotiq_85_left_knuckle_joint" multiplier="-1" />
+    <limit effort="50.0" lower="-0.8" upper="0.0" velocity="0.5" />
+  </joint>
+  <joint name="arm_robotiq_85_left_finger_tip_joint" type="continuous">
+    <parent link="arm_robotiq_85_left_finger_link" />
+    <child link="arm_robotiq_85_left_finger_tip_link" />
+    <axis xyz="0 -1 0" />
+    <origin rpy="0 0 0" xyz="0.00563134 0.0 0.04718515" />
+    <mimic joint="arm_robotiq_85_left_knuckle_joint" multiplier="-1" />
+    <limit effort="50.0" lower="-0.8" upper="0.0" velocity="0.5" />
+  </joint>
+  <joint name="arm_robotiq_85_right_finger_tip_joint" type="continuous">
+    <parent link="arm_robotiq_85_right_finger_link" />
+    <child link="arm_robotiq_85_right_finger_tip_link" />
+    <axis xyz="0 -1 0" />
+    <origin rpy="0 0 0" xyz="-0.00563134 0.0 0.04718515" />
+    <mimic joint="arm_robotiq_85_left_knuckle_joint" />
+    <limit effort="50.0" lower="0.0" upper="0.8" velocity="0.5" />
+  </joint>
+  <link name="arm_sensor_puck_link" />
+  <joint name="arm_sensor_puck_joint" type="fixed">
+    <parent link="arm_end_effector_link" />
+    <child link="arm_sensor_puck_link" />
+    <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+  </joint>
+  <joint name="arm_tool_frame_joint" type="fixed">
+    <parent link="arm_end_effector_link" />
+    <child link="arm_tool_frame" />
+    <origin xyz="0.0 0.0 0.134" rpy="0.0 0.0 0.0" />
+  </joint>
+  <joint name="arm_robotiq_85_base_joint" type="fixed">
+    <parent link="arm_sensor_puck_link" />
+    <child link="arm_robotiq_85_base_link" />
+    <origin xyz="0.0 0.0 0.014" rpy="0.0 0.0 0.0" />
+  </joint>
+</robot>

@@ -1,4 +1,4 @@
-"""The side grasp (the node's `grasp: side`, this branch's default): the hand comes in along the door from the hinge
+"""The side grasp (the node's `grasp: side` or automatic fallback): the hand comes in along the door from the hinge
 side of the handle, one finger between the bar and the door, and closes across the bar from its front and back.
 
 Seen from above it is the front grasp's hand turned 90 deg about the vertical (away from the hinge), then turned back
@@ -8,9 +8,8 @@ approach (level, as the front grasp's straight-in) from a line-up point SIDE_SLI
 along their own axis and every point before the grasp is shallower than the grasp. Tilted (SIDE_TILTS_DEG) nose-down
 (+) or nose-up (-) about the finger axis, the pads stay where the level hand puts them.
 
-The pads' place on the bar is what ran on the arm on 11-06 (side_grasp.side_grasp_poses on 89504f3, which used the then
-GRIP_EXT 0.126): SIDE_PADS_INTO_M behind the detected handle point, then SIDE_PADS_PAST_BAR_M further along the
-approach. It is written out here because GRIP_EXT (the front grasp's) has changed since.
+The fitted handle datum is the print's outer face. Aim the pad midpoint at the printed bar's section center
+and use that same point as the pivot for the hand's lag in the swing.
 
 cuRobo keeps 2 cm (and its spheres) off every box, so it would call the finger behind the bar a collision with the door
 and the handle. Where the hand slides in, holds and backs off, its worlds leave the handle out and, in a window from the
@@ -68,7 +67,7 @@ def grasp_pose(h, orient, n, hinge, tilt_deg):
     level = rot.as_matrix()[:, 2]
     if np.dot(level, want) < 0.999:
         raise Refused(f"side grasp: the hand's approach {np.round(level, 3)} isn't the insert {np.round(want, 3)}")
-    pads = np.asarray(h, float) + into * F.SIDE_PADS_INTO_M + level * F.SIDE_PADS_PAST_BAR_M
+    pads = bar_point(h, n)
     rot = rot * R.from_euler("x", tilt_deg, degrees=True)
     tool = pads - rot.as_matrix()[:, 2] * shared.GRASP_PADS_PAST_TOOL
     return tool, rot.as_quat(), pads
@@ -87,10 +86,9 @@ def unbend(pos, quat):
 
 
 def bar_point(h, n):
-    """Where the hand holds the bar (the pivot it turns about in the swing): SIDE_PADS_INTO_M behind the detected
-    handle point `h`, at its height -- the pads go SIDE_PADS_PAST_BAR_M on past it, so the bar sits deep in the hand."""
-    into = -np.array([n[0], n[1], 0.0], float)
-    return np.asarray(h, float) + into / np.linalg.norm(into) * F.SIDE_PADS_INTO_M
+    """The center of the printed bar's section relative to the detected outer face."""
+    out = np.array([n[0], n[1], 0.0], float)
+    return np.asarray(h, float) - out / np.linalg.norm(out) * F.HANDLE_BAR_CENTER_DEPTH_M
 
 
 def slide_direction(df, deg):
@@ -122,7 +120,7 @@ def door_reference(h, n):
     close and the push-open read a side grasp's door file as they read the front's."""
     into = -np.array([n[0], n[1], 0.0], float)
     into /= np.linalg.norm(into)
-    return np.asarray(h, float) - into * (F.GRIP_EXT - F.GRASP_X_ADJUST)
+    return bar_point(h, n) - into * shared.GRASP_PADS_PAST_TOOL
 
 
 def candidates(geom):
@@ -135,6 +133,8 @@ def candidates(geom):
     out, far = [], []
     for tilt in F.SIDE_TILTS_DEG:
         pos, quat, _ = grasp_pose(h, geom["orient"], n, hinge, tilt)
+        if geom.get("grasp_retry"):
+            pos += F.GRASP_RETRY_OUT_M * n
         if shared.MAX_REACH is not None and np.linalg.norm(pos) > shared.MAX_REACH:
             far.append(f"{tilt:+.0f}")
             continue

@@ -19,8 +19,11 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+from door_common import timing
 from door_common.common import DoorFrame, Refused, door_dims, say
 from scipy.spatial.transform import Rotation as R
+
+from . import door_sweep, world_budget
 
 # the handle: a bar this far out of the door's face (measured 11-06), this wide along the door, and this much taller
 # than its grippable straight length (its mounts)
@@ -67,16 +70,31 @@ class FridgeModel:
             "dims": [round(float(dv), 5), round(float(du), 5), round(float(dz), 5)],
         }
 
-    def body(self):
-        """The cabinet behind the closed door (it never moves)."""
+    def support(self):
+        """The stationary cabinet below the appliance: the appliance's own footprint (door slab plus body behind it),
+        its front flush to the closed door."""
+        height = self.door.get("support_height", 0.0)
+        if height <= 0:
+            return []
         df = self.df
-        _, _, _, body_depth = door_dims(self.door)
+        _, _, _, depth = door_dims(self.door)
+        depth += df.t  # the footprint runs from the door's front face to the body's back
+        width = self.door.get("body_width", df.length)
+        z = self.door["support_floor_z"] + height / 2
+        return [self._box("support_cabinet", df.length / 2, df.t / 2 - depth / 2, 0.0, z, width, depth, height)]
+
+    def body(self):
+        """The appliance behind the door and the support it sits on."""
+        df = self.df
+        _, _, _, depth = door_dims(self.door)
         lo, hi = _door_z(self.door)
-        return [
-            self._box(
-                "body", df.length / 2, -df.t / 2 - body_depth / 2, 0.0, (lo + hi) / 2, df.length, body_depth, hi - lo
-            )
-        ]
+        support = self.support()
+        height = self.door.get("body_height", hi - lo)
+        width = self.door.get("body_width", df.length)
+        if support:
+            lo = self.door["support_floor_z"] + self.door["support_height"]
+        fridge = self._box("body", df.length / 2, -df.t / 2 - depth / 2, 0.0, lo + height / 2, width, depth, height)
+        return [fridge, *support]
 
     def slab(self, deg, tag="door", window=None, v=None):
         """The door slab open `deg`. `window` (u0, u1, z0, z1): leave this part of it out, through its thickness --
@@ -173,21 +191,87 @@ class PlannerWorld:
     put back, resolved by the planner next to its config. `extra`: obstacle dicts every scene also has (the level
     mount's stand-in for the chair)."""
 
-    def __init__(self, arm, write_dir, planner_dir=None, base_layers=(), restore_world="world.yaml", extra=()):
+    def __init__(
+        self,
+        arm,
+        write_dir,
+        planner_dir=None,
+        base_layers=(),
+        restore_world="world.yaml",
+        extra=(),
+        *,
+        sweep_config=None,
+    ):
         self.arm = arm
         self.write_dir = Path(write_dir)
         self.planner_dir = Path(planner_dir or write_dir)
         self.base_layers = list(base_layers)
         self.restore_world = restore_world
         self.extra = list(extra)
+        self.sweep_config = sweep_config
+        self._sweep_boxes = None
+        self._budget_settings = None
+        self._fit_cache = {}
+        self.restore_needed = False
         self.loaded = None  # the obstacles the planner holds now (pushed by this action), None: not ours
         self.pushes = 0
         self.push_s = 0.0  # time spent pushing worlds (writing the scene, the planner loading it)
 
-    def push(self, obstacles, label):
+    def door_sweep_boxes(self):
+        if self._sweep_boxes is None:
+            if self.sweep_config is None:
+                boxes = [
+                    box
+                    for box in self.extra
+                    if box["name"].partition("/")[0] in door_sweep.CHAIR_LAYERS | {"chair_stand_in"}
+                ]
+                self._sweep_boxes = boxes, door_sweep.LAYER_PADDING_M
+            else:
+                try:
+                    self._sweep_boxes = door_sweep.deployment_boxes(self.sweep_config)
+                except (OSError, ValueError, TypeError, KeyError, AttributeError, yaml.YAMLError) as e:
+                    raise Refused(f"Door sweep layers unavailable ({self.sweep_config}): {e}") from e
+        return self._sweep_boxes
+
+    def _box_budget(self):
+        if self._budget_settings is None:
+            budget, reserved, padding = world_budget.DEFAULT_BOX_BUDGET, 0, door_sweep.LAYER_PADDING_M
+            if self.sweep_config is not None:
+                path = Path(self.sweep_config)
+                try:
+                    config = yaml.safe_load(path.read_text())
+                    settings = config.get("planner", {})
+                    budget = int(settings.get("collision_cache_obb", budget))
+                    padding = float(settings.get("world_padding", padding))
+                    if budget < 1 or not np.isfinite(padding) or padding < 0:
+                        raise ValueError("invalid collision cache capacity or world padding")
+                    layers = {(path.parent / name).resolve() for name in [*config.get("layers", []), *self.base_layers]}
+                    for layer in layers:
+                        reserved += len(yaml.safe_load(layer.read_text())["obstacles"])
+                except (OSError, ValueError, TypeError, KeyError, AttributeError, yaml.YAMLError) as e:
+                    raise Refused(f"Cannot count cuRobo collision boxes from {path}: {e}") from e
+            self._budget_settings = dict(budget=budget, reserved=reserved, padding=padding)
+        return self._budget_settings
+
+    @timing.timed("world_push")
+    def push(self, obstacles, label, *, deadline=None):
         """Make `obstacles` (+ `extra`) the planner's world. Nothing is sent if it holds exactly these already.
         Raises Refused if the planner refuses it."""
-        obstacles = self.extra + list(obstacles)
+        obstacles = list(obstacles)
+        required = obstacles
+        # Chair and occupant geometry are fixed safety layers. Only room geometry is eligible for reduction.
+        surrounding = [box for box in self.extra if box["name"].startswith("room_")]
+        required = [box for box in self.extra if not box["name"].startswith("room_")] + required
+        settings = self._box_budget()
+        count = len(required)
+        if count + len(surrounding) + settings["reserved"] > settings["budget"]:
+            if count not in self._fit_cache:
+                fitted = world_budget.fit_boxes(required, surrounding, label=label, **settings)
+                self._fit_cache[count] = fitted[: len(fitted) - count]
+            surrounding = self._fit_cache[count]
+            obstacles = surrounding + required
+        else:
+            obstacles = self.extra + obstacles
         if obstacles == self.loaded:
             return
         t0 = time.monotonic()
@@ -196,23 +280,27 @@ class PlannerWorld:
         tmp = self.write_dir / f".{SCENE_NAME}.tmp"
         tmp.write_text(f"# written by the fridge capability: {label}\n" + yaml.safe_dump(scene, sort_keys=False))
         os.replace(tmp, self.write_dir / SCENE_NAME)
-        ok, msg = self.arm.set_world(str(self.planner_dir / SCENE_NAME))
+        kwargs = {} if deadline is None else {"deadline": deadline}
+        self.restore_needed = True
+        self.loaded = None
+        ok, msg = self.arm.set_world(str(self.planner_dir / SCENE_NAME), **kwargs)
         if not ok:
-            self.loaded = None
             raise Refused(f"the cuRobo planner refused the fridge's collision world ({label}): {msg}")
         self.loaded = obstacles
         self.pushes += 1
         self.push_s += time.monotonic() - t0
 
+    @timing.timed("world_restore")
     def restore(self):
         """Put the robot's own world back (also after a cancel). Says so if the planner refuses it."""
-        if self.loaded is None and not self.pushes:
+        if not self.restore_needed:
             return
         try:
             ok, msg = self.arm.set_world(self.restore_world, even_if_cancelled=True)
         except Exception as e:  # noqa: BLE001 -- the action is ending either way
             ok, msg = False, repr(e)
         self.loaded, self.pushes, self.push_s = None, 0, 0.0
+        self.restore_needed = False
         if not ok:
             say(f"WARNING: could not put the planner's world back to {self.restore_world}: {msg}")
 

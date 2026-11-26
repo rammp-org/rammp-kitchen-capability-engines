@@ -25,6 +25,8 @@ from functools import partial
 
 import numpy as np
 import rammp_arm
+from capability_engine.driver_state import Refused as ArmRefused
+from door_common import timing
 from door_common.common import Refused, say
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.transform import Slerp
@@ -167,11 +169,15 @@ class Planner:
         self.budget_s = budget_s  # the time one search may take (s); None: no limit
         self.t0 = time.monotonic()
         self.search_t0 = self.t0  # when the current search started (search()): the budget's clock
+        self.deadline = None  # shared deadline for bounded open preflight
+        self.last_failure = {}
         self.plans = 0
+        self.feedback_settle = False
         self.finished = False  # the last run(): the driver ran the whole trajectory (no stop), wherever the tool ended
         self.cached = 0
         self.local = 0  # legs solved here (on or along the door)
         self.plan_s = 0.0
+        self._failure_details = {}
         self._cache = {}  # the same leg (goal, start, world) is planned once per action
         # a free goal cuRobo found no collision-free arm configuration AT (goal_unreachable): that doesn't depend on
         # where the leg starts, so it isn't asked again from another start (11-09 sim: the push-open's 16 hand
@@ -206,17 +212,37 @@ class Planner:
         base driving, or the camera detecting) never counts against a later re-plan."""
         self.search_t0 = time.monotonic()
 
-    def check_budget(self):
-        """Raise OverBudget if the current search has used up budget_s (also for work done here, between plans)."""
+    def request_kwargs(self):
+        return {} if self.deadline is None else {"deadline": self.deadline}
+
+    @timing.timed("world_update")
+    def push_world(self, obstacles, label):
+        self.check_deadline()
+        try:
+            self.world.push(obstacles, label, **self.request_kwargs())
+        except ArmRefused as error:
+            self.check_deadline()
+            raise Refused(f"{label}: {error}") from error
+
+    def check_deadline(self):
         self.checkpoint()
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise OverBudget("open preflight deadline reached")
+
+    def check_budget(self):
+        """Check both the overall deadline and the legacy per-search budget."""
+        self.check_deadline()
         if self.budget_s is not None and time.monotonic() - self.search_t0 > self.budget_s:
             raise OverBudget(f"planning took longer than its {self.budget_s:.0f} s budget ({self.plans} plans)")
 
+    @timing.timed("planner_request")
     def _ask(self, request, label):
         """cuRobo's answer to `request()` (a plan or a blend: .success, .message), asked again while the planner is busy
         with another client (BUSY_RETRIES), then PlannerBusy: a busy answer is not "no plan"."""
         for k in range(1 + BUSY_RETRIES):
+            self.check_deadline()
             res = request()
+            self.check_deadline()
             if res.success or not busy(res.message):
                 return res
             if k < BUSY_RETRIES:
@@ -226,6 +252,72 @@ class Planner:
             "fridge node (or another capability) planning at the same time? Nothing was planned."
         )
 
+    def preflight_start(self, obstacles, measured, staging, *, grasp_retry=False):
+        """Ask cuRobo to validate the measured start with all collision layers active."""
+        self.push_world(obstacles, "the closed fridge")
+        q = list(map(float, measured))
+        checked = self._ask(lambda: self.arm.plan_to_joints(q, q, **self.request_kwargs()), "check open start")
+        if checked.success:
+            return None
+        text = " ".join(str(checked.message).split())
+        if grasp_retry and "LIBRARY_VALIDATION_FAILED" in text and "velocity" in text:
+            # A joint plan back to the identical measured state can take a detour and fail its velocity check.
+            # The retry needs only a stationary collision and joint-limit check in the same full world.
+            positions = np.tile(q, (3, 1))
+            hold = LocalPlan(
+                True, "stationary wrist retry", np.array([0.0, 0.02, 0.04]), positions, np.zeros_like(positions)
+            )
+            stationary = self._ask(
+                lambda: self.arm.blend(
+                    [hold], [], speed_scale=[1.0], hold=[HOLD_NONE], hold_orientation=[None], **self.request_kwargs()
+                ),
+                "check stationary wrist retry",
+            )
+            if stationary.success:
+                say("  wrist retry start validated as a stationary trajectory")
+                return None
+            text = f"{text}; stationary check: {' '.join(str(stationary.message).split())}"
+        if "START_STATE_WORLD_COLLISION" not in text:
+            raise StartNotClear(f"could not validate the measured open start: {text}")
+        blockers = [
+            {"body": name.strip(), "penetration_mm": float(depth)}
+            for name, depth in re.findall(r"([^,\[\]]+) \(([0-9.]+) mm\)", text.partition("start collides with ")[2])
+        ]
+        # A backend may support start repair. Only accept a trajectory from the measured
+        # joints, confined to a small neighborhood, with the collision layers still enabled.
+        delta = _short_delta(measured, staging)
+        bound = np.radians(12.0)
+        target = np.asarray(measured) + delta * min(1.0, bound / max(bound, np.max(np.abs(delta))))
+        planned = False
+        try:
+            repaired = self._ask(
+                lambda: self.arm.plan_to_joints(target, q, **self.request_kwargs()), "bounded joint staging"
+            )
+        except (OverBudget, PlannerBusy) as error:
+            staging_detail = str(error)
+        else:
+            samples = np.asarray(repaired.q)
+            planned = bool(
+                repaired.success
+                and samples.ndim == 2
+                and samples.shape[0] >= 2
+                and samples.shape[1] == len(q)
+                and np.max(np.abs(samples[0] - measured)) <= 1e-4
+                and np.max(np.abs(samples[-1] - target)) <= 1e-3
+                and np.max(np.abs(samples - measured)) <= bound + 1e-4
+            )
+            staging_detail = repaired.message or "the planner's trajectory failed the staging bounds"
+        return {
+            "stage": "start",
+            "reason": f"the arm's start pose is not clear: {text}",
+            "blocking_bodies": blockers,
+            "staging_planned": planned,
+            "staging_reason": (
+                "bounded joint staging planned" if planned else f"no verified staging trajectory: {staging_detail}"
+            ),
+            "staging_joints_rad": target.tolist() if planned else None,
+        }
+
     def tool(self, q):
         """(position, quat) of the tool at joints `q`."""
         return self.fk.pose(q)
@@ -234,21 +326,35 @@ class Planner:
         """cuRobo's leg to `goal` from joints `q_start`, checked (see the module). Returns (Plan, None) or (None,
         why). `from_arm`: `q_start` is where the arm is -- if cuRobo says that start is not clear (inside an obstacle of
         its world or the chair's layers, or past a limit) nothing can start from it, and it raises StartNotClear."""
-        self.checkpoint()
+        self.check_budget()
         key = self._key(goal, q_start, start_pose)
         if key in self._cache:
+            self.last_failure = self._failure_details.get(key, {})
             self.cached += 1
             return self._cache[key]
         goal_key = self._goal_key(goal)
         if goal_key in self._unreachable:
             self.cached += 1
-            return self._unreachable[goal_key]
-        if self.budget_s is not None and time.monotonic() - self.search_t0 > self.budget_s:
-            raise OverBudget(f"planning took longer than its {self.budget_s:.0f} s budget ({self.plans} plans)")
+            out = self._unreachable[goal_key]
+            self.last_failure = dict(stage=goal.label, reason=out[1], start_limit_margin_deg=self.limit_margin(q_start))
+            return out
+        self.last_failure = {}
         self._cache[key] = out = self._leg(goal, q_start, start_pose, from_arm)
+        if out[0] is None:
+            self.last_failure.update(
+                stage=goal.label,
+                reason=out[1],
+                start_limit_margin_deg=self.limit_margin(q_start),
+                world=goal.world_label or goal.label,
+            )
+            self._failure_details[key] = self.last_failure
         if goal_key is not None and out[0] is None and goal_unreachable(out[1]):
             self._unreachable[goal_key] = out
         return out
+
+    def limit_margin(self, q):
+        q = np.asarray(q, float)
+        return float(np.degrees(np.min(np.minimum(q - self.fk.lower, self.fk.upper - q))))
 
     def _goal_key(self, goal):
         """A free pose goal's key without its start (None for other legs: theirs depend on the start)."""
@@ -258,7 +364,7 @@ class Planner:
         return key[:6] + key[8:]  # without the start (joints, pose)
 
     def _leg(self, goal, q_start, start_pose, from_arm):
-        self.world.push(goal.world, goal.world_label or goal.label)
+        self.push_world(goal.world, goal.world_label or goal.label)
         t0 = time.monotonic()
         if goal.path != "free":
             # on or along the door: cuRobo can't follow a line or an arc (11-07: its pose and joint goals both left them
@@ -268,12 +374,16 @@ class Planner:
         for _ in range(1 + RAISED_RETRIES):
             if goal.joints is not None:
                 plan = self._ask(
-                    lambda: self.arm.plan_to_joints(list(map(float, goal.joints)), list(map(float, q_start))),
+                    lambda: self.arm.plan_to_joints(
+                        list(map(float, goal.joints)), list(map(float, q_start)), **self.request_kwargs()
+                    ),
                     goal.label,
                 )
             else:
                 plan = self._ask(
-                    lambda: self.arm.plan_to_pose(goal.pos, goal.quat, list(map(float, q_start)), hold=goal.hold),
+                    lambda: self.arm.plan_to_pose(
+                        goal.pos, goal.quat, list(map(float, q_start)), hold=goal.hold, **self.request_kwargs()
+                    ),
                     goal.label,
                 )
             self.plans += 1
@@ -312,8 +422,11 @@ class Planner:
         poses, caps = path_poses(goal, np.asarray(p0, float), np.asarray(q0, float))
         qs, q = [], np.asarray(q_start, float)
         for k, (pos, quat) in enumerate(poses):
+            self.check_budget()
             nq, why = self.fk.ik(pos, quat, q)
             if nq is None:
+                self.last_failure["waypoint"] = k + 1
+                self.last_failure["previous_limit_margin_deg"] = self.limit_margin(q)
                 return None, f"{goal.label}: point {k + 1}/{len(poses)}: {why}"
             jump = float(np.degrees(np.max(np.abs(nq - q))))
             if jump > MAX_STEP_DEG:
@@ -325,7 +438,7 @@ class Planner:
         # cuRobo checks it now, in this leg's own world: every state against the world, the chair's layers and the arm
         # itself, and the joint limits (a one-leg blend validates it), so a leg that clips something fails here, where
         # the search can still try another placement, not when the motion is joined
-        self.world.push(goal.world, goal.world_label or goal.label)
+        self.push_world(goal.world, goal.world_label or goal.label)
         t0 = time.monotonic()
         res = self._ask(
             lambda: self.arm.blend(
@@ -334,11 +447,13 @@ class Planner:
                 speed_scale=[1.0],
                 hold=[goal.hold],
                 hold_orientation=[goal.quat if goal.hold != HOLD_NONE else None],
+                **self.request_kwargs(),
             ),
             goal.label,
         )
         self.plan_s += time.monotonic() - t0
         if not res.success:
+            self.last_failure["min_path_limit_margin_deg"] = self.limit_margin(qq)
             return None, f"{goal.label}: cuRobo rejects it ({_short(res.message)})"
         if goal.segment_worlds is not None:
             why = self._check_segments(goal, np.asarray(q_start, float), np.asarray(qs), segments(goal, p0, q0))
@@ -359,7 +474,7 @@ class Planner:
             label, world = goal.segment_worlds[k]
             before = q_start if start == 0 else qs[start - 1]
             t, qq, qd = timed(before, qs[start : end + 1])
-            self.world.push(world, label)
+            self.push_world(world, label)
             t0 = time.monotonic()
             res = self._ask(
                 partial(
@@ -369,15 +484,22 @@ class Planner:
                     speed_scale=[1.0],
                     hold=[goal.hold],
                     hold_orientation=[goal.quat if goal.hold != HOLD_NONE else None],
+                    **self.request_kwargs(),
                 ),
                 f"{goal.label} against {label}",
             )
             self.plan_s += time.monotonic() - t0
             if not res.success:
+                self.last_failure.update(
+                    min_path_limit_margin_deg=self.limit_margin(qq),
+                    collision_world=label,
+                    first_segment_waypoint=start + 1,
+                )
                 return f"against {label}, cuRobo rejects it ({_short(res.message)})"
             start = end + 1
         return ""
 
+    @timing.timed("motion_plan")
     def motion(self, goals, q0, start_pose=None, from_arm=False):
         """Plan every goal in turn, each from where the last ends. Returns (Motion, None) or (None, why). `from_arm`:
         `q0` is where the arm is (leg's)."""
@@ -393,6 +515,7 @@ class Planner:
             pose = (goal.pos, goal.quat)
         return Motion(done, legs, np.asarray(q0, float)), None
 
+    @timing.timed("blend")
     def join(self, motion, world, world_label="blend", speed=None):
         """cuRobo's blend of `motion`'s legs into one trajectory, against `world` (obstacles every leg's own world
         has, so each leg is valid in it): free legs at GO_TO_SPEED_SCALE (x `speed`), contact legs at CONTACT_SPEED of
@@ -428,11 +551,19 @@ class Planner:
             if bumped[k] == 0.0 and bumped[k - 1] > 0.0:
                 bumped[k] = BLEND_MIN_M
         attempts = [radii] + ([bumped] if bumped != radii else []) + ([[0.0] * len(radii)] if any(radii) else [])
-        self.world.push(world, world_label)
+        self.push_world(world, world_label)
         for attempt in attempts:
             self.checkpoint()
             plan = self._ask(
-                partial(self.arm.blend, motion.legs, attempt, speed_scale=scales, hold=holds, hold_orientation=quats),
+                partial(
+                    self.arm.blend,
+                    motion.legs,
+                    attempt,
+                    speed_scale=scales,
+                    hold=holds,
+                    hold_orientation=quats,
+                    **self.request_kwargs(),
+                ),
                 "blend",
             )
             if plan.success:
@@ -462,6 +593,7 @@ class Planner:
         pos, _ = self.fk.poses(motion.joined.q)
         return float(motion.joined.t[int(np.argmin(np.linalg.norm(pos - np.asarray(point, float), axis=1)))])
 
+    @timing.timed(lambda self, motion, label, *args, **kwargs: f"arm_motion:{label}")
     def run(self, motion, label, impedance=None, events=(), tol=KEYPOINT_TOL_M):
         """Run the joined `motion` (join first). Refuses if the arm has moved since it was planned. `impedance`: run it
         compliant -- the driver's joint impedance with these gains ({kq, zeta, torque_limit}, + path_tol: the tracking
@@ -498,13 +630,24 @@ class Planner:
                     # gripper opening at the pull's end -- must not happen with the arm stopped part way
                     thread.cancel()
                 thread.join(timeout=10.0)
-        time.sleep(SETTLE_S)
-        st = self.arm.get_state()
-        err = float(np.linalg.norm(np.asarray(st["ee_pos"][:3]) - motion.goals[-1].pos))
         self.finished = res.error_code == 0
-        if res.error_code != 0:
+        if not self.finished:
             say(f"{label}: STOPPED ({rammp_arm.ERRORS.get(res.error_code, res.error_code)} {res.error_string})")
             return False
+        if not self.feedback_settle:
+            time.sleep(SETTLE_S)
+        until = time.monotonic() + SETTLE_S
+        while True:
+            st = self.arm.get_state()
+            err = float(np.linalg.norm(np.asarray(st["ee_pos"][:3]) - motion.goals[-1].pos))
+            if not self.feedback_settle or time.monotonic() >= until:
+                break
+            speed = np.max(np.abs(st["velocity"]))
+            joint_error = np.max(np.abs(_short_delta(plan.q[-1], st["position"])))
+            if err <= tol and speed <= 0.02 and joint_error <= np.radians(1):
+                break
+            self.checkpoint()
+            time.sleep(0.02)
         say(f"{label}: done, tool {err * 100:.1f} cm from the last goal")
         return err <= tol
 

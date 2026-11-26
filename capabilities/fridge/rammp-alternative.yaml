@@ -29,6 +29,8 @@ container:
     # (set_world with its path): the planner container must mount the same host directory at the same
     # path (planner_world_dir), read-only is enough.
     - /tmp/rammp_planner_worlds:/rammp_planner_worlds
+    # Same robot config and chair layer files as the planner, for door-sweep preflight.
+    - ./config/robots/current:/config/robot:ro
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
@@ -39,9 +41,9 @@ params:
   data_dir: /fridge_data
   # The arm's forward lean in its mount (deg): 0 (dojo) or 30 (flatbot, gen_1_5).
   mount_tilt_deg: 0
-  # The open's grasp: side (in along the door from the hinge side, one finger behind the bar, tilted
+  # The open's grasp: auto (front then side for a default push-open), side (in along the door from the hinge side, one finger behind the bar, tilted
   # -40 to 40 deg) or front (fingers across the bar, straight in). Picks the placement advice.
-  grasp: side
+  grasp: auto
   # Wrist camera; depth must be aligned to colour. camera_frame "" = the colour image's frame_id.
   # depth/image_rect_raw is aligned to colour on the D405 and the OAK (flatbot); the D435i's is not --
   # with it, override this to /wrist_camera/aligned_depth_to_color/image_raw.
@@ -56,7 +58,7 @@ params:
   # sticking out of the door). door_normal handle_model and handle need sam3.
   handle_source: sam3
   sam3_service: /perception/sam3/detect
-  sam3_prompts: [handle]
+  sam3_prompts: [handle, door handle, black handle]
   sam3_threshold: 0.3
   # Measured on the fridge being opened (m); see Before a run in docs/interface.md.
   # The STL's bar middle; set from the 11-06 measurements once the camera's handle point is measured (TESTING.md).
@@ -65,13 +67,18 @@ params:
   # (handle_centre_to_face_m + pin_behind_face_m), 0.374 m along it. See constants.py.
   pin_behind_face_m: -0.021
   hinge_along_door_m: 0.374
+  hinge_side: left
   door_width_m: 0.44958
   door_depth_m: 0.10668
   door_above_handle_m: 0.381
   door_below_handle_m: 0.3937
   # NOT MEASURED: the STL's straight bar between its mounts. Measure it.
   handle_length_m: 0.2032
-  body_depth_m: 0.5
+  body_depth_m: 0.35052  # 18 in overall (listing) less the 4.2 in door slab in front of it
+  body_width_m: 0.4826
+  body_height_m: 0.8382
+  support_height_m: 0.50
+  support_floor_z_m: -0.502
   # The wheelchair: on the 30-deg mount it is the cuRobo planner's own collision layers, in every
   # world; the level mount (no layers) gets this stand-in box behind the arm base (m) in the fridge's
   # world. And which way moving the chair back moves the fridge in the arm's frame (x, y).
@@ -90,6 +97,7 @@ params:
   planner_world_dir_in_planner: ""
   planner_base_layers: [/config/robot/curobo/layer_mebot_floor.yaml]
   planner_restore_world: world.yaml
+  planner_sweep_config: /config/robot/curobo/planner.yaml
   # How each look measures the door's direction: handle_model (the printed handle's model fit to SAM 3's
   # mask on the depth, as the side grasp's estimator), handle (the bar and its plate), plane (a door-plane
   # fit over the whole image) or square (TESTING ONLY: the door taken as square to the arm).
@@ -159,10 +167,24 @@ params:
   "arm.close_stream_wait_s": 1.0
   "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
   "arm.mock_urdf": ""
+  # Experimental fixture-A docking, with both RGB-D cameras online. Enable for the Gen1.5 after
+  # checking the odometry datum, arm staging pose, full chair footprint and emergency stop.
+  docking_enabled: false
+  guided_docking_enabled: false
+  guided_parking_instruction: ""
+  open_scene_fallback_enabled: false
+  open_wrist_relook_enabled: false
+  docking_target_handle_xy: [0.825, -0.235]
+  docking_target_yaw_deg: -14.0
+  docking_max_linear_speed: 0.05
+  docking_max_yaw_speed: 0.12
+  docking_axle_to_mount_xy: [0.11595, 0.284325]
+  docking_odom_to_axle_xy: [0.0, 0.0]
   # The UI bridge node whose request_user_input action and service show the UI buttons' panels (capability_engine).
   ui_bridge_node_name: ui_bridge_node
-publishes: [/fridge/status]
+publishes: [/fridge/status, /setpoint/joint_position]
 subscribes:
+  - /stream_status
   - /tf
   - /tf_static
   - /wrist_camera/color/image_raw

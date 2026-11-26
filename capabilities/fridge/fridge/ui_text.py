@@ -156,7 +156,7 @@ _REFUSALS = (
         "Try again.",
     ),
     (
-        r"Gripper is OPEN -- nothing grasped",
+        r"Gripper is OPEN -- nothing grasped|Grasp unconfirmed \(empty close",
         "The gripper closed on nothing, so the arm didn't pull.",
         None,
         "Check the hand is around the handle; move the arm away (teleop) and try again.",
@@ -306,6 +306,9 @@ def _match(rules, raw):
 def refusal(action_id, raw):
     """(reason, state, todo) for a refusal (dc.Refused as the node raised it) in plain words."""
     raw = str(raw or "")
+    if raw.startswith("Door sweep blocked by "):
+        _, _, hint = raw.partition(". ")
+        return "The door would swing into the wheelchair or occupant.", None, hint
     if action_id == "open":
         found = _open_infeasible(raw)
         if found:

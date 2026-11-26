@@ -17,7 +17,8 @@ whenever allow_execute is on.
 The wheelchair moves the open and the close plan (back ~30 cm before the close; 5-20 cm before the push-open's push,
 when it needs one) are made by hand by default: the goal stops and asks, and a goal with `chair_moved` goes on. With
 `drive_base` true an executing goal drives the base that fixed distance itself (base_drive, self.base) at `base_speed`
-m/s and goes on in the same goal. A dry run with drive_base only checks the base's odometry is there.
+m/s and goes on in the same goal. On a Gen1.5 configured with docking_enabled, an executed open with drive_base
+also aims for the fixture-A dock before planning any arm motion. A dry run with drive_base only checks odometry.
 
     ros2 launch fridge fridge.launch.py use_orchestrator:=false
     make action CAP=fridge ACTION=open PARAMS='{"execute": false}'
@@ -41,8 +42,10 @@ from capability_engine import Action, BaseError, Cancelled, CapabilityEngine, En
 from capability_ui import RunUI, cancel_own_run
 from door_common import common as dc
 from door_common import open_door as shared_open
+from door_common import timing
 
-from . import base_drive, close_door, constants, motion, open_door, push_open, relocalize, ui_text
+from . import arrival, base_drive, close_door, constants, docking, motion, open_door, push_open, relocalize, ui_text
+from .door_sweep import SweepBlocked
 from .kinematics import Chain
 from .perception import WristCamera
 from .planning import Planner
@@ -85,15 +88,14 @@ PARAMS = {
     "mount_tilt_deg": 0,
     # the open's grasp (constants.GRASPS): "side" (side_grasp.py: in along the door from the hinge side, one finger
     # behind the bar, tilted -40..40 deg) or "front" (fingers across the bar, straight in). Picks the placement advice
-    "grasp": "side",
+    "grasp": "auto",
     "color_topic": "/wrist_camera/color/image_raw",
     "camera_info_topic": "/wrist_camera/color/camera_info",
     # every wrist camera's depth, aligned to colour on the D405 and the OAK; the D435i needs aligned_depth_to_color
     "depth_topic": "/wrist_camera/depth/image_rect_raw",
     "camera_frame": "",
     # which camera finds the handle and measures the door: "wrist" (color_topic, camera_info_topic, depth_topic: what
-    # every executed open has used, and what GRIP_EXT was tuned on) or "scene" (the scene_* topics below, as the side
-    # grasp measured the door on 11-06; its handle point is not the wrist camera's: GRIP_EXT is unchecked with it)
+    # every executed open has used) or "scene" (the scene_* topics below)
     "detect_camera": "wrist",
     # where the handle comes from: "sam3" (SAM 3's mask of sam3_prompts, from sam3_service) or "depth" (the vertical bar
     # sticking out of the door)
@@ -104,9 +106,11 @@ PARAMS = {
     # taken as square to the arm). handle_model and handle need handle_source sam3
     "door_normal": "handle_model",
     "sam3_service": "/perception/sam3/detect",
-    "sam3_prompts": ["handle"],
+    # Nov 16 replays recovered bar and bracket silhouettes with complementary handle prompts.
+    "sam3_prompts": ["handle", "door handle", "black handle"],
     "sam3_threshold": 0.3,
     **constants.MEASURED,
+    "hinge_side": "left",
     # the fridge's collision world for the cuRobo planner (world.py): this node writes it into planner_world_dir, a host
     # directory the planner container mounts too, at planner_world_dir_in_planner ("": the same path), and pushes it
     # with set_world. planner_base_layers: the robot world's layers every pushed scene lists again (as the planner sees
@@ -116,6 +120,7 @@ PARAMS = {
     "planner_world_dir_in_planner": "",
     "planner_base_layers": ["/config/robot/curobo/layer_mebot_floor.yaml"],
     "planner_restore_world": "world.yaml",
+    "planner_sweep_config": "/config/robot/curobo/planner.yaml",
     "chair_back_dir": list(constants.CHAIR_BACK_DIR),
     # go_to_start's pose: the arm's joints J1..J7 (deg)
     "start_joints_deg": list(constants.START_JOINTS_DEG),
@@ -137,6 +142,19 @@ PARAMS = {
     "boxes_topic": "/perception/object_detections_3d",
     # drive_base: its limits and the MIB drive profile (base_drive.PARAMS)
     **base_drive.PARAMS,
+    "docking_max_linear_speed": 0.05,
+    "docking_max_yaw_speed": 0.12,
+    "docking_enabled": False,  # fixture A / Gen1.5, after verifying the route and odometry datum on hardware
+    "open_timing_enabled": False,
+    "open_early_empty_view_switch": False,
+    "open_wrist_relook_enabled": False,  # alternate wrist motion needs calibrated scene geometry
+    "open_scene_fallback_enabled": False,  # retry a refused fixed-base wrist look on the scene camera
+    "guided_docking_enabled": False,  # show checked drive steps on the Open UI buttons
+    "guided_parking_instruction": "",  # deployment-specific floor mark for the initial arrival
+    "docking_target_handle_xy": docking.TARGET_HANDLE.tolist(),
+    "docking_target_yaw_deg": float(np.degrees(docking.TARGET_YAW)),
+    "docking_axle_to_mount_xy": list(docking.AXLE_TO_MOUNT[:2]),
+    "docking_odom_to_axle_xy": list(docking.ODOM_TO_AXLE),
 }
 
 # The UI's buttons (one press each, no settings): the action each runs, with what. Go to Fridge: the start pose
@@ -230,8 +248,11 @@ class Capability(CapabilityEngine):
                 "type": "object",
                 "properties": {
                     **COMMON,
+                    "speed": {key: value for key, value in COMMON["speed"].items() if key != "default"},
+                    "profile": {"type": "string", "enum": ["standard", "fast", "hook"], "default": "standard"},
                     "swing_deg": {"type": "integer", "minimum": 30, "maximum": 110},
                     "push_open": {"type": "boolean", "default": True},
+                    "short_reentry": {"type": "boolean"},
                     # full-pull path only (push_open false): False tests the pull alone -- after the swing just let go
                     # and back off the handle, no round-the-door (the plan is gated by the back-off only)
                     "around": {"type": "boolean", "default": True},
@@ -244,6 +265,7 @@ class Capability(CapabilityEngine):
                     "chair_moved": {"type": "boolean", "default": False},
                     # false: plan the open with no wheelchair move (the push from where the chair is, or refuse)
                     "base_moves": {"type": "boolean", "default": True},
+                    "search_alternate_placements": {"type": "boolean", "default": False},
                     # a dry run that plans OK also writes the door file as the planned open would leave it, so the
                     # close can be tested without an executed open (open the door to that angle by hand)
                     "save_door": {"type": "boolean", "default": False},
@@ -282,6 +304,8 @@ class Capability(CapabilityEngine):
             self.cfg["mount_tilt_deg"],
             self.cfg["door_normal"],
             self.cfg["grasp"],
+            hinge_side=self.cfg["hinge_side"],
+            early_empty_view_switch=self.cfg["open_early_empty_view_switch"],
             **{k: self.cfg[k] for k in constants.MEASURED},
         )
         if self.cfg["handle_source"] not in ("depth", "sam3"):
@@ -394,9 +418,24 @@ class Capability(CapabilityEngine):
             )
             self._ui_failed(ui, action_id, error)
             raise error
+        parking = self.cfg.get("guided_parking_instruction", "").strip()
+        if (
+            parking
+            and not self.mock
+            and self.cfg.get("guided_docking_enabled")
+            and (action_id == "go_to_start" or (action_id == "open" and params.get("drive_base")))
+        ):
+            pressed = ui.ask(
+                f"{parking} Stop the wheelchair, then press Continue.",
+                [{"button_id": "continue", "label": "Continue"}],
+                timeout_s=constants.UI_PROMPT_TIMEOUT_S,
+            )
+            if not self._ui_answer(ui, "parking at the fridge", pressed, "continue"):
+                raise EngineError("parking_required", parking, recoverable=True)
         while True:
             ctx.checkpoint()
-            self._drove = False  # as _execute sets it: a Stop before _execute runs mustn't read the last goal's
+            self._drove = False  # a Stop before _execute runs mustn't read the last goal's
+            self._guided = False
             try:
                 result = ui.motion(
                     UI_MOVING[action_id],
@@ -456,7 +495,12 @@ class Capability(CapabilityEngine):
         """A check refused (recoverable) with nothing holding: the same button may try again. Never after an open
         that may have left the hand on the handle, and never once the goal drove the wheelchair (drive_base): a
         retry would drive the picked move again from where it now is."""
-        if error.error_code != "refused" or not error.recoverable or getattr(self, "_drove", False):
+        if (
+            error.error_code not in {"refused", "open_no_motion", "start_staging_required"}
+            or not error.recoverable
+            or getattr(self, "_drove", False)
+            or getattr(self, "_guided", False)
+        ):
             return False
         return not Capability._ui_maybe_holding(action_id, error)
 
@@ -481,8 +525,8 @@ class Capability(CapabilityEngine):
     @contextlib.contextmanager
     def _ui_driving(self, action_id, move):
         """Around a drive_base move of the wheelchair, on a UI button: the moving panel says the wheelchair is driving
-        (`move` m, + back), Stop still on it; once the drive ends, the action's own moving text again. Panel text only:
-        nothing here changes the drive, and a panel that fails is only logged. A direct goal shows nothing."""
+        (`move` m, + back, or None during docking), with a Stop button. Restore the action's moving text
+        when the drive ends. A panel failure is logged. A direct goal has no panel."""
         ui = getattr(self, "_ui", None)
 
         def show(message):
@@ -492,7 +536,7 @@ class Capability(CapabilityEngine):
                 self.get_logger().warning(f"UI driving panel: couldn't show it: {e!r}")
 
         if ui is not None:
-            show(ui_text.driving(move))
+            show("Docking the wheelchair. Keep the route clear." if move is None else ui_text.driving(move))
         yield
         if ui is not None:  # not after a drive that raised: the Stopped or failure notice follows
             show(UI_MOVING[action_id])
@@ -585,9 +629,230 @@ class Capability(CapabilityEngine):
                 log = self.get_logger().info if back else self.get_logger().error
                 log(f"contact stop: default profile {'back' if back else 'NOT restored'} ({said})")
 
+    def _open_scene_camera(self, camera, checkpoint):
+        topics = tuple(self.cfg[k] for k in ("scene_color_topic", "scene_camera_info_topic", "scene_depth_topic"))
+        if not all(topics):
+            raise dc.Refused("The fridge look needs the scene RGB-D camera topics")
+        return (
+            camera
+            if self.cfg["detect_camera"] == "scene"
+            else WristCamera(
+                self,
+                *topics,
+                rammp_arm.FRAME,
+                sam3=self.sam3,
+                sam3_prompts=self.cfg["sam3_prompts"],
+                sam3_threshold=self.cfg["sam3_threshold"],
+                checkpoint=checkpoint,
+            )
+        )
+
+    def _detect_open_with_scene_fallback(self, camera, checkpoint):
+        try:
+            return open_door.detect(self.arm)
+        except dc.Refused:
+            scene = self._open_scene_camera(camera, checkpoint)
+            self.get_logger().info("Fridge wrist look refused. Trying the scene view.")
+            try:
+                dc.set_camera(scene)
+                scene.require_frames_after_now()
+                return open_door.detect(self.arm)
+            finally:
+                dc.set_camera(camera)
+
+    def _dock_open(self, ctx, world, camera, speed, cfg, *, planner=None, guided=False, autonomous=True, preview=None):
+        if self.cfg["door_normal"] == "square":
+            raise dc.Refused("Docking needs a measured door normal")
+        if not np.allclose(self.cfg["chair_back_dir"], [1.0, 0.0]):
+            raise dc.Refused("Docking needs the Gen1.5 arm mount square to the wheelchair")
+        scene = self._open_scene_camera(camera, ctx.checkpoint)
+        mount = np.asarray(self.cfg["docking_axle_to_mount_xy"], float)
+        odom = np.asarray(self.cfg["docking_odom_to_axle_xy"], float)
+        if any(offset.shape != (2,) or not np.isfinite(offset).all() for offset in (mount, odom)):
+            raise dc.Refused("Invalid docking axle calibration")
+
+        target_handle = np.asarray(self.cfg.get("docking_target_handle_xy", docking.TARGET_HANDLE), float)
+        target_yaw = np.radians(self.cfg.get("docking_target_yaw_deg", np.degrees(docking.TARGET_YAW)))
+        if target_handle.shape != (2,) or not np.isfinite([*target_handle, target_yaw]).all():
+            raise dc.Refused("Invalid docking target")
+        target = {}
+        if not np.array_equal(target_handle, docking.TARGET_HANDLE) or target_yaw != docking.TARGET_YAW:
+            target = dict(target_handle=target_handle, target_yaw=target_yaw)
+
+        def look():
+            scene.require_frames_after_now()
+            dc.set_camera(scene)
+            try:
+                return open_door.detect(self.arm, for_docking=True)
+            except dc.Refused:
+                if camera is scene:
+                    raise
+                self.get_logger().info("Docking scene look refused. Trying the stationary wrist view.")
+                dc.set_camera(camera)
+                camera.require_frames_after_now()
+                return open_door.detect(self.arm, for_docking=True)
+            finally:
+                dc.set_camera(camera)
+
+        guided_mark = (
+            getattr(self, "_ui", None) is not None
+            and self.cfg.get("guided_docking_enabled")
+            and self.cfg.get("guided_parking_instruction", "").strip()
+        )
+        raw_arrival = not guided and not guided_mark
+
+        def parked_joints_and_layers():
+            q = np.asarray(self.arm.joint_states().position, float)
+            start = np.radians(self.cfg["start_joints_deg"])
+            if not np.isfinite(q).all() or _joint_gap_deg(start, q) > constants.START_REACHED_DEG:
+                raise dc.Refused("Move the arm to the verified Fridge start pose before docking")
+            boxes, padding = world.door_sweep_boxes()
+            if not boxes:
+                raise dc.Refused("Docking requires the deployed chair and occupant geometry")
+            return q, boxes, padding
+
+        def check_arrival():
+            q, boxes, padding = parked_joints_and_layers()
+            arm_boxes = arrival.arm_envelopes(self._fk, q)
+            scene.require_frames_after_now()
+            try:
+                frame = scene.grab()
+            except RuntimeError as error:
+                raise dc.Refused(arrival.REPARK) from error
+            return arrival.reverse_distance(frame, boxes, arm_boxes, padding)
+
+        def arrival_relook():
+            scene.require_frames_after_now()
+            obstacles = arrival.relook_obstacle(scene.grab())
+            wrist = camera
+            if camera is scene:
+                wrist = WristCamera(
+                    self,
+                    self.cfg["color_topic"],
+                    self.cfg["camera_info_topic"],
+                    self.cfg["depth_topic"],
+                    rammp_arm.FRAME,
+                    self.cfg["camera_frame"],
+                    sam3=self.sam3,
+                    sam3_prompts=self.cfg["sam3_prompts"],
+                    sam3_threshold=self.cfg["sam3_threshold"],
+                    checkpoint=ctx.checkpoint,
+                )
+            dc.set_camera(wrist)
+            try:
+                return open_door.detect_after_arrival_relook(self.arm, planner, wrist, obstacles)
+            finally:
+                dc.set_camera(camera)
+
+        route_guard = docking.ParkedRouteGuard(
+            world.sweep_config, self.arm.robot_description, self._fk, mount, raw_arrival, self.get_logger().warning
+        )
+
+        def guard(geom, route):
+            q, boxes, padding = parked_joints_and_layers()
+            route_guard.check(geom["closed_model"], q, boxes, padding, route)
+
+        def confirm(detected):
+            if camera is scene:
+                return detected
+
+            def wrist_look():
+                camera.require_frames_after_now()
+                # Predictive docking may still have a planner request and a
+                # checked ready prefix to reverse on a refused observation.
+                if (
+                    planner is not None
+                    and preview is None
+                    and self.cfg.get("open_wrist_relook_enabled")
+                    and self.cfg["door_normal"] == "handle_model"
+                ):
+                    return open_door.detect_with_wrist_relook(
+                        self.arm, planner, camera, lambda: detected[0]["closed_model"]
+                    )
+                return open_door.detect(self.arm)
+
+            return docking.confirm_wrist(self.base, self.arm, detected, wrist_look, odom, mode_entered=self._drove)
+
+        drive_cfg = {
+            **cfg,
+            "docking_max_linear_speed": self.cfg["docking_max_linear_speed"],
+            "docking_max_yaw_speed": self.cfg["docking_max_yaw_speed"],
+        }
+        with contextlib.ExitStack() as ui_motion:
+
+            def moving():
+                self._drove = True
+                ui_motion.enter_context(self._ui_driving("open", None))
+                ctx.progress("open", 0.0, "Docking the wheelchair. Keep the route clear.", pausable=False)
+
+            if guided:
+                ui = self._ui
+
+                def show(distance, turn):
+                    message = docking.guidance_text(distance, turn)
+                    ui.moving(message)
+                    if not ui.connected:
+                        raise dc.Refused("Guided docking needs the wheelchair instructions panel")
+                    self._guided = True
+                    ctx.progress("open", 0.0, message, pausable=False)
+
+                detected, iterations = docking.guide(
+                    self.base,
+                    self.arm,
+                    ctx,
+                    look,
+                    guard,
+                    axle_to_mount=mount,
+                    odom_to_axle=odom,
+                    show=show,
+                    coarse=autonomous,
+                    **target,
+                )
+                ui.moving("Checking the parking position. Keep the wheelchair stopped.")
+            if autonomous:
+                detected, iterations = docking.dock(
+                    self.base,
+                    self.arm,
+                    ctx,
+                    look,
+                    guard,
+                    speed=speed,
+                    cfg=drive_cfg,
+                    axle_to_mount=mount,
+                    odom_to_axle=odom,
+                    on_motion=moving,
+                    on_route=preview,
+                    confirm=confirm,
+                    arrival_check=check_arrival if raw_arrival else None,
+                    arrival_relook=(
+                        arrival_relook if planner is not None and self.cfg.get("open_wrist_relook_enabled") else None
+                    ),
+                    **target,
+                )
+        ctx.progress("open", 0.0, f"Dock confirmed after {iterations} correction(s)", pausable=False)
+        return detected if autonomous else confirm(detected)
+
     def _execute(self, action_id, params, ctx):
+        if action_id != "open" or not self.cfg.get("open_timing_enabled", False):
+            return self._execute_action(action_id, params, ctx)
+        with timing.record() as trace:
+            try:
+                result = self._execute_action(action_id, params, ctx)
+            except EngineError as error:
+                error.payload = {**(error.payload or {}), "timing": trace.diagnostics()}
+                raise
+            result["timing"] = trace.diagnostics()
+            return result
+
+    def _execute_action(self, action_id, params, ctx):
         self._drove = False  # whether this goal has driven the wheelchair (drive_base)
-        speed = float(params.get("speed", constants.CLOSE_SPEED if action_id == "close" else 1.0))
+        self._guided = False
+        profile = params.get("profile", "standard") if action_id == "open" else "standard"
+        if profile not in ("standard", "fast", "hook"):
+            raise EngineError("bad_params", "'profile' must be standard, fast or hook", recoverable=True)
+        fast = profile in ("fast", "hook")
+        default_speed = constants.CLOSE_SPEED if action_id == "close" else 0.7 if fast else 1.0
+        speed = float(params.get("speed", default_speed))
         if not 0.0 < speed <= 1.0:
             raise EngineError("bad_params", "'speed' must be in (0, 1]", recoverable=True)
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
@@ -607,7 +872,7 @@ class Capability(CapabilityEngine):
         if action_id == "go_to_start":  # mock too: self.arm's mock plans and moves the mock joints
             return self._go_to_start(ctx, execute, speed, note)
         if self.mock:
-            ctx.progress(action_id, 100.0, "mock: nothing detected or moved")
+            ctx.progress(action_id, 1.0, "mock: nothing detected or moved")
             return {"executed": False, "mock": True}
 
         ctx.checkpoint()
@@ -616,37 +881,59 @@ class Capability(CapabilityEngine):
         world = self._planner_world()
         planner = Planner(self.arm, world, self._fk, ctx.checkpoint, budget_s=constants.PLAN_BUDGET_S)
         # the camera's subscriptions and tf buffer are this action's: the engine destroys them when it ends
-        dc.set_camera(
-            WristCamera(  # the detection camera (detect_camera): the wrist's or the scene's
-                self,
-                *self.detect_topics,
-                rammp_arm.FRAME,
-                self.cfg["camera_frame"] if self.cfg["detect_camera"] == "wrist" else "",
-                sam3=self.sam3,
-                sam3_prompts=self.cfg["sam3_prompts"],
-                sam3_threshold=self.cfg["sam3_threshold"],
-            )
+        camera = WristCamera(  # the detection camera (detect_camera): the wrist's or the scene's
+            self,
+            *self.detect_topics,
+            rammp_arm.FRAME,
+            self.cfg["camera_frame"] if self.cfg["detect_camera"] == "wrist" else "",
+            sam3=self.sam3,
+            sam3_prompts=self.cfg["sam3_prompts"],
+            sam3_threshold=self.cfg["sam3_threshold"],
+            checkpoint=ctx.checkpoint,
         )
+        dc.set_camera(camera)
         dc.set_output(self.get_logger().info)
         shared_open.configure(CHECKPOINT=ctx.checkpoint)  # a cancel stops a long plan, not only a motion
         ctx.progress(action_id, 0.0, note or ("executing" if execute else "dry run"))
         log_args = {**params, "execute": execute}
         # a dry run gets it too, for its messages; it refuses to drive unless the goal executes
         drive_chair = None
+        may_park = (
+            action_id == "open"
+            and bool(params.get("base_moves", True))
+            and not params.get("release_only")
+            and not params.get("chair_moved")
+        )
+        docking_requested = may_park and drive_base and bool(self.cfg.get("docking_enabled"))
+        guidance_requested = (
+            may_park
+            and bool(self.cfg.get("guided_docking_enabled"))
+            and getattr(self, "_ui", None) is not None
+            and not (docking_requested and self.cfg.get("guided_parking_instruction", "").strip())
+        )
         if drive_base:
             base_cfg = {k: self.cfg[k] for k in base_drive.PARAMS}
             move_chair = partial(
-                base_drive.move_chair, self.base, self.arm, ctx, speed=base_speed, cfg=base_cfg, execute=execute
+                base_drive.move_chair,
+                self.base,
+                self.arm,
+                ctx,
+                speed=min(base_speed, 0.05) if docking_requested else base_speed,
+                cfg=base_cfg,
+                execute=execute,
+                keep_heading=docking_requested,
             )
 
             def drive_chair(move):
+                mode_entered = self._drove
                 self._drove = True  # from its first command on, wherever it ends: the UI then never retries
                 with self._ui_driving(action_id, move):  # a UI button's panel says the wheelchair is driving
-                    return move_chair(move)
+                    return move_chair(move, mode_entered=mode_entered)
 
         contact = contextlib.ExitStack()  # the loose contact profile while an executed open / close runs
         try:
             # before the arm moves, if this goal may drive the base: its odometry and the arm's e-stop status are there
+            may_dock = (docking_requested or guidance_requested) and execute
             if action_id == "open":
                 may_drive = (
                     bool(params.get("push_open", True))
@@ -655,10 +942,74 @@ class Capability(CapabilityEngine):
                 )
             else:
                 may_drive = params.get("chair_back") is None or float(params["chair_back"]) != 0
-            if drive_base and may_drive:
+            if (drive_base and may_drive) or may_dock:
                 base_drive.check(self.base, self.arm)
-            contact.enter_context(self._contact_expected(execute))
+            if not may_dock:
+                contact.enter_context(self._contact_expected(execute))
+
+            def dock_then_contact(preview=None):
+                if guidance_requested:
+                    detected = self._dock_open(
+                        ctx,
+                        world,
+                        camera,
+                        base_speed,
+                        self.cfg,
+                        planner=planner,
+                        guided=True,
+                        autonomous=docking_requested,
+                    )
+                else:
+                    detected = self._dock_open(
+                        ctx, world, camera, base_speed, base_cfg, planner=planner, preview=preview
+                    )
+                contact.enter_context(self._contact_expected(execute))
+                return detected
+
+            def start_wrist():
+                def scene_model():
+                    scene = self._open_scene_camera(camera, ctx.checkpoint)
+                    scene.require_frames_after_now()
+                    dc.set_camera(scene)
+                    try:
+                        geom, _ = open_door.detect(self.arm, for_docking=True)
+                        return geom["closed_model"]
+                    finally:
+                        dc.set_camera(camera)
+
+                return open_door.detect_with_wrist_relook(self.arm, planner, camera, scene_model)
+
+            def retry_wrist():
+                if self.cfg["detect_camera"] == "wrist":
+                    camera.require_frames_after_now()
+                    return open_door.detect(self.arm)
+                wrist = WristCamera(
+                    self,
+                    self.cfg["color_topic"],
+                    self.cfg["camera_info_topic"],
+                    self.cfg["depth_topic"],
+                    rammp_arm.FRAME,
+                    self.cfg["camera_frame"],
+                    sam3=self.sam3,
+                    sam3_prompts=self.cfg["sam3_prompts"],
+                    sam3_threshold=self.cfg["sam3_threshold"],
+                    checkpoint=ctx.checkpoint,
+                )
+                dc.set_camera(wrist)
+                try:
+                    return open_door.detect(self.arm)
+                finally:
+                    dc.set_camera(camera)
+
             if action_id == "open":
+                detect_open = dock_then_contact if may_dock else None
+                if (
+                    detect_open is None
+                    and self.cfg.get("open_scene_fallback_enabled")
+                    and self.cfg["detect_camera"] == "wrist"
+                ):
+                    detect_open = partial(self._detect_open_with_scene_fallback, camera, ctx.checkpoint)
+
                 ok = open_door.run(
                     self.arm,
                     planner,
@@ -674,12 +1025,28 @@ class Capability(CapabilityEngine):
                     chair_moved=bool(params.get("chair_moved", False)),
                     chair_back_dir=self.cfg["chair_back_dir"],
                     drive_chair=drive_chair,
-                    base_moves=bool(params.get("base_moves", True)),
+                    base_moves=bool(params.get("base_moves", True)) and not (guidance_requested and not drive_base),
+                    search_alternate_placements=bool(params.get("search_alternate_placements", False)),
+                    staging=np.radians(self.cfg["start_joints_deg"]),
+                    progress=lambda fraction, message: ctx.progress(action_id, fraction, message, pausable=False),
+                    detect_at_dock=detect_open,
+                    detect_at_start=start_wrist
+                    if execute
+                    and self.cfg.get("open_wrist_relook_enabled")
+                    and self.cfg["detect_camera"] == "wrist"
+                    and self.cfg["door_normal"] == "handle_model"
+                    else None,
+                    detect_retry=retry_wrist,
+                    allow_short_handoff=docking_requested,
+                    short_reentry=bool(params.get("short_reentry", fast)),
+                    fast=fast,
+                    hook=profile == "hook",
+                    predictive=fast and may_dock and docking_requested and not guidance_requested,
                 )
                 if ok and execute:  # the door file is true now: the view the close re-detects the fridge against
                     relocalize.capture_reference(self.arm)
                 if ok and push_open.NEXT_STEP:  # the wheelchair move it asks for, where the goal was sent
-                    ctx.progress(action_id, 100.0, push_open.NEXT_STEP)
+                    ctx.progress(action_id, 1.0, push_open.NEXT_STEP)
                     note = f"{note}. {push_open.NEXT_STEP}" if note else push_open.NEXT_STEP
             else:
                 settings = {k: v for k, v in params.items() if k in close_door.GOAL_SETTINGS}
@@ -699,7 +1066,7 @@ class Capability(CapabilityEngine):
                         f"Plan OK. With execute true and drive_base true the base drives the wheelchair "
                         f"{close_door.how_moved(chair_back)} at {base_speed:.2f} m/s, then closes."
                     )
-                    ctx.progress(action_id, 100.0, next_step)
+                    ctx.progress(action_id, 1.0, next_step)
                     note = f"{note}. {next_step}" if note else next_step
                 elif ok and not execute and chair_back != 0 and not settings.get("chair_moved"):
                     # the plan passed: say, where the goal was sent (feedback and the result), what comes next
@@ -707,9 +1074,27 @@ class Capability(CapabilityEngine):
                         f"Plan OK. {close_door.move_chair(chair_back)}, then send the close with execute true and "
                         "chair_moved true."
                     )
-                    ctx.progress(action_id, 100.0, next_step)
+                    ctx.progress(action_id, 1.0, next_step)
                     note = f"{note}. {next_step}" if note else next_step
+        except (open_door.Infeasible, open_door.StagingRequired) as e:
+            code = "start_staging_required" if isinstance(e, open_door.StagingRequired) else "open_no_motion"
+            payload = dict(e.payload)
+            if self._drove:
+                payload["base_motion_attempted"] = True
+            raise EngineError(code, str(e), recoverable=True, payload=payload) from e
+        except SweepBlocked as e:
+            payload = {**e.payload, **({"base_motion_attempted": True} if self._drove else {})}
+            if params.get("chair_moved"):  # the resumed push: the door is part open, so a retry blocks the same way
+                raise EngineError("refused", str(e), recoverable=False, payload=payload) from e
+            raise EngineError("open_no_motion", str(e), recoverable=True, payload=payload) from e
         except dc.Refused as e:
+            if self._drove:
+                raise EngineError(
+                    "refused",
+                    f"{e} -- the arm holds where it is",
+                    recoverable=True,
+                    payload={"base_motion_attempted": True},
+                ) from e
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
         except BaseError as e:  # a wheelchair move stopped part way (or the MIB refused it): the base commanded still
             raise EngineError(
@@ -733,7 +1118,10 @@ class Capability(CapabilityEngine):
         # that pushes it reports that)
         if execute and not (action_id == "open" and push_open.NEXT_STEP):
             ctx.update_object(self.instance_id, opened=action_id == "open")
-        return {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR)}
+        result = {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR)}
+        if action_id == "open" and push_open.FINAL_ANGLE_DEG is not None:
+            result["push_final_angle_deg"] = push_open.FINAL_ANGLE_DEG
+        return result
 
     def _planner_world(self):
         """This action's PlannerWorld: the scenes it pushes list planner_base_layers, and on the level mount the chair
@@ -746,6 +1134,7 @@ class Capability(CapabilityEngine):
             [x for x in self.cfg["planner_base_layers"] if x],
             self.cfg["planner_restore_world"],
             extra=[chair_stand_in(self.cfg["chair_keep_out_behind_m"])] if self.cfg["mount_tilt_deg"] == 0 else [],
+            sweep_config=self.cfg["planner_sweep_config"] if self.cfg["mount_tilt_deg"] == 30 else None,
         )
 
     def _go_to_start(self, ctx, execute, speed, note):
@@ -760,7 +1149,7 @@ class Capability(CapabilityEngine):
         gap = _joint_gap_deg(target, q_now)
         if gap <= constants.START_REACHED_DEG:
             done = f"already at the fridge start pose (every joint within {gap:.1f} deg): nothing moved"
-            ctx.progress(action_id, 100.0, done)
+            ctx.progress(action_id, 1.0, done)
             return {"executed": False, "note": f"{note}. {done}" if note else done}
         world = self._planner_world()
         try:
@@ -785,9 +1174,9 @@ class Capability(CapabilityEngine):
             planned_s = float(plan.t[-1]) if len(plan.t) else 0.0
             if not execute:
                 done = f"dry run: the fridge start pose plans ({planned_s:.1f} s at full speed); nothing moved"
-                ctx.progress(action_id, 100.0, f"{note}. {done}" if note else done)
+                ctx.progress(action_id, 1.0, f"{note}. {done}" if note else done)
                 return {"executed": False, "note": f"{note}. {done}" if note else done}
-            ctx.progress(action_id, 10.0, "moving to the fridge start pose")
+            ctx.progress(action_id, 0.1, "moving to the fridge start pose")
             scale = max(0.01, rammp_arm.GO_TO_SPEED_SCALE * speed)  # `speed` scales it, as in every fridge run
             if not self.arm.go_to_joint_config(target, label="go_to_start", speed_scale=scale):
                 raise EngineError(
@@ -800,7 +1189,7 @@ class Capability(CapabilityEngine):
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
         finally:
             world.restore()  # the robot's own planner world back (only if this action pushed one)
-        ctx.progress(action_id, 100.0, "at the fridge start pose")
+        ctx.progress(action_id, 1.0, "at the fridge start pose")
         return {"executed": True, "note": note}
 
 

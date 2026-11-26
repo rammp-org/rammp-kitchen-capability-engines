@@ -8,6 +8,7 @@ import time
 import numpy as np
 import rammp_arm
 from door_common import common as dc
+from door_common import timing
 from door_common.common import Refused, RunLog, say
 
 _CONSOLE = None  # the running goal's console.log (logged_run sets it), or None between runs
@@ -75,7 +76,7 @@ def _stop_bag(rec):
         say(f"  (the rosbag did not close cleanly: {e!r})")
 
 
-def logged_run(what, ai, log_args, speed, task):
+def logged_run(what, ai, log_args, speed, task, *, fast=False):
     """`task()` -> ok, logged to RUNS_DIR/<time>_<what> (RunLog) with a camera frame before and after, everything the
     node logs meanwhile in its console.log, and a rosbag (BAG) in its bag/. `speed` (0..1] scales every arm
     motion for this run only. Returns ok; a refusal passes through."""
@@ -83,13 +84,17 @@ def logged_run(what, ai, log_args, speed, task):
     rammp_arm.CART_SPEED *= speed
     rammp_arm.JOINT_SPEED *= speed
     rammp_arm.GO_TO_SPEED_SCALE = max(0.01, rammp_arm.GO_TO_SPEED_SCALE * speed)
+    saved_contact = (rammp_arm.CONTACT_CART_SPEED, rammp_arm.CONTACT_JOINT_SPEED)
+    if fast:
+        rammp_arm.CONTACT_CART_SPEED, rammp_arm.CONTACT_JOINT_SPEED = 0.135, 0.75
     log = bag = None
     ok = False
     try:
-        log = RunLog(what, log_args, ai)
+        with timing.span("debug_log_setup"):
+            log = RunLog(what, log_args, ai)
         _set_console(log.dir / "console.log")
         to_console("INFO", f"run log: {log.dir}")
-        bag = _start_bag(log.dir)
+        bag = timing.timed("debug_bag_start")(_start_bag)(log.dir)
         log.frame(f"{what}_start")
         ok = task()
         log.event(what, ok=ok)
@@ -101,11 +106,12 @@ def logged_run(what, ai, log_args, speed, task):
             to_console("ERROR", f"stopped: {e}")
         raise
     finally:
-        if log is not None:
-            log.close(ok)
-        _stop_bag(bag)
-        _set_console(None)
         rammp_arm.CART_SPEED, rammp_arm.JOINT_SPEED, rammp_arm.GO_TO_SPEED_SCALE = saved
+        rammp_arm.CONTACT_CART_SPEED, rammp_arm.CONTACT_JOINT_SPEED = saved_contact
+        if log is not None:
+            timing.timed("debug_log_close")(log.close)(ok)
+        timing.timed("debug_bag_stop")(_stop_bag)(bag)
+        _set_console(None)
 
 
 def opened(door, deg):
