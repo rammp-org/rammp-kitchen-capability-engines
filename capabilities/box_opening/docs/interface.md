@@ -168,7 +168,7 @@ beside the container, and goes home. It has one action, `open_box`:
    wrist's frame from where the arm stands: the wrist looks at the table from
    there, its frame is pooled into the map, and the search goes once more.
    The carry to any of these further spots, and to every spot after the
-   first (below), is asked more than the first spot's own, because the
+   first (below), is asked what every carry is, because the
    planner knows no table and a path of its own between two places over the
    table can sink a hand's width on the way. It is the arm's own walk first,
    a straight line from where the arm stands to over the spot at that
@@ -187,10 +187,26 @@ beside the container, and goes home. It has one action, `open_box`:
    on-table check above knows only a hand straight down. With no body model,
    or one whose sphere file gives the hand or either link of the wrist no
    sphere (the run says so once), no such leaning set-down is taken, and a
-   carry is asked of the lid and a hand straight down over it alone. The first spot's own carry and set-down are
-   planned as they have been flown: of the 22 first carries on record 18
-   pass the path check and 4 do not (three sank 12-59 mm on the way, one
-   passed its wrist camera by something standing), and the one recorded
+   carry is asked of the lid and a hand straight down over it alone. The
+   first spot's own carry is asked the same of its path (the canister, its
+   height all the way, what stands under it and the hand's own body; ahead
+   of the lift on the map its spot was chosen on, after it on the spot
+   look's), but it is the planner's path first, as it has been flown: where
+   that passes it flies as before, where it does not the walk is tried, and
+   where neither passes the spot is refused with both reasons and the next
+   one tried (ahead of the lift, where no spot's passes, no carry is planned
+   ahead, and the spot is chosen after the lift). Of the 22 first carries on record 18 pass the
+   path check and 4 do not (three sank 12-59 mm on the way, one passed its
+   wrist camera by something standing); not flown with this check. Ahead
+   of the lift the checks run where that carry is planned: with the grip
+   straight from the press (the default), with the arm standing at the top
+   of its rise off the button, before it comes down to the knob, so they
+   lengthen that stop (27-42 ms a carry on a desktop, a carry walked after
+   its path failed asked twice; not measured on the robot); from the look
+   pose, while the hand comes down to the knob; and where neither planned a
+   carry, while the lift flies. Ahead of the lift the canister is asked
+   against the lid's top as that grip takes it. The
+   first spot's set-down is planned as it has been flown: the one recorded
    leaning set-down with a map kept 145 mm from everything standing.
 1. **Set down:** fast to 80 mm over where the run has the lid meet the table,
    then slowly, to 8 mm under it at most. That height is the cameras' table

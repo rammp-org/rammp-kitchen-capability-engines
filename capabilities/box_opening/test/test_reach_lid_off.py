@@ -3224,7 +3224,7 @@ def test_the_carry_search_in_two_parts_finds_what_carry_ahead_does_and_plans_onl
             asked.append(s[2])
             yield s
 
-    def carry(ctx_, cfg_, q, drop):
+    def carry(ctx_, cfg_, q, drop, **kw):
         plans.append(drop.xyz[0])
         return (None, "refused") if drop.xyz[0] < 0.515 else (SimpleNamespace(legs=[], retreat=[]), None)
 
@@ -3245,6 +3245,36 @@ def test_the_carry_search_in_two_parts_finds_what_carry_ahead_does_and_plans_onl
     assert (once.drop.xyz, once.tier, once.refused, once.home) == (got.drop.xyz, got.tier, got.refused, got.home)
     # the rise's half with no lift hands that on; the way down's makes nothing of it
     assert rlo.grip_ahead_down((None, "no lift", None)) == (None, "no lift", None)
+
+
+@pytest.mark.parametrize("cameras_z, setdown_z", [(0.20, 0.22), (0.22, 0.20)])
+def test_the_carry_planned_ahead_is_asked_over_the_higher_table_with_the_grip_it_is_planned_for(
+    ctx, monkeypatch, cameras_z, setdown_z
+):
+    """The first carry planned ahead of the lift (CarrySearch) is asked its path on the map the spot was
+    chosen on, over the table the set-down goes by or the cameras' where that stands higher (the less room),
+    as the carry chosen after the lift is (SpotSearch.way), the lid as it hangs where the clear ends — and
+    the canister against the lid's top as THIS grip takes it (`q_grip`): ctx.lid_lifted is not set until
+    the close, and on a second attempt it is the last attempt's lift."""
+    cfg = load_press_demo(PINK)
+    spot = (SimpleNamespace(xyz=(0.5, 0.0, 0.2), yaw=0.0), "clear", "says")
+    kws = []
+    monkeypatch.setattr(rlo, "spot_candidates", lambda *a, **k: iter([spot]))
+    monkeypatch.setattr(rlo, "spot_map", lambda *a, **k: "the map")
+    monkeypatch.setattr(rlo, "_table_z", lambda *a, **k: cameras_z)
+    monkeypatch.setattr(rlo, "setdown_table_z", lambda ctx_, table_z, fix, q_grip=None: (setdown_z, None))
+    from box_opening.tasks import press_demo as pd
+
+    monkeypatch.setattr(pd, "keep_out_counter", lambda *a, **k: None)
+    monkeypatch.setattr(rlo, "plan_carry", lambda ctx_, cfg_, q, d, **kw: kws.append(kw) or (None, "no"))
+    monkeypatch.setattr(ctx, "lid_lifted", SimpleNamespace(q_grip=[0.9] * 7), raising=False)  # the last attempt's
+    q_end, q_grip = [0.1] * 7, [0.2] * 7
+    rlo.CarrySearch(ctx, cfg, (None, None, None, None), q_end, q_grip=q_grip).start().finish()
+    ((kw,),) = [kws]
+    way = kw["way"]
+    assert kw["first"] is True and way.tmap == "the map" and way.held == pytest.approx(q_end)
+    assert way.table_z == pytest.approx(max(cameras_z, setdown_z))
+    assert way.q_grip == pytest.approx(q_grip)  # this grip's, not the last attempt's
 
 
 def test_no_carry_that_plans_puts_the_lid_back_on_the_box_and_goes_home(ctx, monkeypatch, tmp_path, capsys):
@@ -3635,7 +3665,7 @@ def test_the_lid_s_spot_is_mapped_and_its_carry_planned_from_where_the_arm_stood
     monkeypatch.setattr(rlo, "spot_map", lambda ctx_, wrist, q, *rest: seen.append(("spot_map", list(q))))
     monkeypatch.setattr(rlo, "spot_candidates", candidates)
     monkeypatch.setattr(
-        rlo, "plan_carry", lambda ctx_, cfg_, q, drop: (seen.append(("plan_carry", list(q))), (None, "refused"))[1]
+        rlo, "plan_carry", lambda ctx_, cfg_, q, drop, **_: (seen.append(("plan_carry", list(q))), (None, "refused"))[1]
     )
     eyes = (None, SimpleNamespace(table_z=-0.027), None, None)
     assert rlo.choose_and_carry(ctx, load_press_demo(PINK), Runner(ctx.client, log_dir=tmp_path), eyes) == 1
@@ -3659,7 +3689,9 @@ def test_the_carry_planned_while_the_lift_flew_is_planned_again_where_the_lids_o
     monkeypatch.setattr(rlo, "spot_candidates", lambda *a, **k: iter([(drop, "clear", "clear")]))
     stale = "place:touch (the cabinet: arm_robotiq_85_base_link 9 mm into cabinet/edge0)"
     monkeypatch.setattr(rlo, "carry_refusal", lambda carry: (seen.append(("checked", carry)), stale)[1])
-    monkeypatch.setattr(rlo, "plan_carry", lambda ctx_, cfg_, q, d: (seen.append(("plan_carry", d)), (None, "no"))[1])
+    monkeypatch.setattr(
+        rlo, "plan_carry", lambda ctx_, cfg_, q, d, **_: (seen.append(("plan_carry", d)), (None, "no"))[1]
+    )
     ahead = rlo.CarryAhead([float(v) for v in ctx.client.joints()], drop=drop, tier="clear", carry="planned ahead")
     runner = Runner(ctx.client, log_dir=tmp_path)
     monkeypatch.setattr(runner, "note", lambda kind, **kw: notes.append((kind, kw)))
@@ -6993,7 +7025,7 @@ def _later_plans(monkeypatch):
     real, asked = rlo.plan_carry, []
 
     def plan(ctx_, cfg_, q, drop, **kw):
-        if kw:
+        if not kw.get("first"):
             asked.append((drop, kw))
         return real(ctx_, cfg_, q, drop, **kw)
 
@@ -7079,8 +7111,8 @@ def test_the_time_is_asked_before_each_plan_too(ctx, monkeypatch, tmp_path, gone
     real, asked = rlo.plan_carry, []
 
     def plan(ctx_, cfg_, q, drop, **kw):
-        if not kw:
-            return real(ctx_, cfg_, q, drop)
+        if kw.get("first"):
+            return real(ctx_, cfg_, q, drop, **kw)
         asked.append(drop)
         clock["left"] = 30.0
         return None, "the carry (walked: no; planned: no)"
@@ -7647,7 +7679,11 @@ def test_a_carry_that_would_bring_the_lid_under_the_top_it_came_off_over_the_can
     ctx.lid_lifted = SimpleNamespace(q_grip=at(bx, by, 0.030 - lid_h))  # gripped with its top 30 mm over theirs
     assert rlo.lid_low_over_box(ctx, [at(bx, by, hang + 0.020)], held) is not None
     assert rlo.lid_low_over_box(ctx, [at(bx, by, hang + 0.031)], held) is None
+    # ... or as the grip it is asked with takes it (a carry planned ahead of the lift: CarrySearch), not the lift's
+    gripped, at_cams = at(bx, by, 0.030 - lid_h), at(bx, by, -lid_h)  # the lid's top 30 mm over the cameras', and at it
+    assert rlo.lid_low_over_box(ctx, [at(bx, by, hang + 0.020)], held, q_grip=at_cams) is None
     ctx.lid_lifted = None
+    assert rlo.lid_low_over_box(ctx, [at(bx, by, hang + 0.020)], held, q_grip=gripped) is not None
     # a hand leaning 30 deg: the lid, level as gripped, hangs its low edge lower. Where a leaning set-down
     # has the lid's lowest point meet a table at the height of the box's top (setdown_poses' own answer for
     # such a spot, over the box), that is exactly where this draws the line
@@ -7660,7 +7696,9 @@ def test_a_carry_that_would_bring_the_lid_under_the_top_it_came_off_over_the_can
     monkeypatch.setattr(approach, "_chain", lambda: _Chain())
     cfg = load_press_demo(PINK)
     asked = []
-    monkeypatch.setattr(rlo, "lid_low_over_box", lambda ctx_, pts, held_: asked.append(list(held_)) or "too low")
+    monkeypatch.setattr(
+        rlo, "lid_low_over_box", lambda ctx_, pts, held_, q_grip=None: asked.append(list(held_)) or "too low"
+    )
 
     def plan(ctx_, state, name, target, world, speed):
         lg = make_leg(name, start=list(state.joints), end=[v + 0.05 for v in state.joints], speed=speed, world=world[0])
@@ -7671,7 +7709,7 @@ def test_a_carry_that_would_bring_the_lid_under_the_top_it_came_off_over_the_can
     drop = ContainerPose(xyz=(0.40, -0.30, -0.07), yaw=0.0)
     q = [0.1] * 7
     carry, why = rlo.plan_carry(ctx, cfg, q, drop)
-    assert carry is not None and why is None and asked == []  # the first spot's carry: as it was
+    assert carry is not None and why is None and asked == []  # no way, no over_box, no lean past 20 deg: not asked
     carry, why = rlo.plan_carry(ctx, cfg, q, rlo.LeanSpot(xyz=drop.xyz, yaw=0.0, lean_deg=20.0))
     assert carry is not None and asked == []
     # ... and where the planner's path is refused for it, the arm's own walk is tried before the spot is
@@ -7709,7 +7747,10 @@ def test_from_a_spot_left_the_next_is_chosen_with_the_lid_as_the_grip_took_it_an
     assert code == 0 and len(plans) == 2
     clear_end = rec.legs["lid:clear"].goal_joints
     (q1, kw1), (q2, kw2) = plans
-    assert q1 == pytest.approx(clear_end) and kw1 == {}  # the first spot's: planned as it always was
+    # the first spot's: the planner's way first, its path asked with the lid as it hangs where the clear ends
+    assert q1 == pytest.approx(clear_end) and kw1.keys() == {"way", "first"} and kw1["first"] is True
+    assert kw1["way"].held == pytest.approx(clear_end) and kw1["way"].table_z == pytest.approx(TABLE_Z)
+    assert kw1["way"].tmap is not None  # (the map that spot was chosen on)
     assert q2 != pytest.approx(q1) and kw2["over_box"] is True and kw2["held"] == pytest.approx(clear_end)
     # ... and asked what a later carry is asked (its own path's height and what stands under it, a leaning
     # hand's way down), the lid as the grip took it there too, over the table the set-down goes by
@@ -7935,7 +7976,8 @@ def test_a_spot_search_plans_to_no_spot_twice_and_each_search_has_its_own_carry_
     assert got.carry is None and got.chosen is None and len(got.refused) == 2 * rlo.CARRY_TRIES == 8
     assert (got.searched, got.looked) == (["the tiers", "wider"], False)
     assert [d for d, _kw in planned] == spots[:8]  # four of the tiers', then the next four: none twice
-    assert [kw for _d, kw in planned[:4]] == [{}] * 4  # the first spot's tiers: planned as they always were
+    for _d, kw in planned[:4]:  # the first spot's tiers: the planner's way first, its path asked as every carry's
+        assert kw.keys() == {"way", "first"} and kw["first"] is True and isinstance(kw["way"], rlo.LaterWay)
     for _d, kw in planned[4:]:  # the wider search's: off the canister, and asked what a later carry is
         assert kw["held"] is None and kw["over_box"] is True and isinstance(kw["way"], rlo.LaterWay)
     # a map not made from here (the scene camera's alone): the wrist looks, and both go once more on its map
@@ -8097,6 +8139,7 @@ def test_a_carry_after_the_first_is_the_arms_own_walk_first_and_the_planners_onl
 
     class Way:
         refuse = {}  # how many points a refused path has -> why
+        q_grip = None
 
         def path(self, pts):
             paths.append(len(pts))
@@ -8149,11 +8192,145 @@ def test_a_carry_after_the_first_is_the_arms_own_walk_first_and_the_planners_onl
     monkeypatch.setattr(approach, "_chain", lambda: chain)
     asked = []
     monkeypatch.setattr(
-        rlo, "lid_low_over_box", lambda ctx_, pts, held_: asked.append(1) or (None if len(asked) > 1 else "too low")
+        rlo,
+        "lid_low_over_box",
+        lambda ctx_, pts, held_, q_grip=None: asked.append(1) or (None if len(asked) > 1 else "too low"),
     )
     carry, why = rlo.plan_carry(ctx, cfg, q, drop, held=[0.2] * 7, over_box=True)
     assert why is None and carry.legs[0].plan_free and len(asked) == 2 and len(chain.walks) == 1
     assert "the planner's carry is no way for the lid (too low): the arm's own walk instead" in capsys.readouterr().out
+
+
+def _points(carry):
+    """A Carry's legs and its retreat as the joint points they fly."""
+    legs = [[list(p.positions) for p in lg.traj.points] for lg in carry.legs]
+    return legs, [list(p) for p in carry.retreat]
+
+
+def test_the_first_carry_is_the_planners_path_where_it_passes_what_every_carry_is_asked_and_the_walk_where_not(
+    ctx, monkeypatch, capsys
+):
+    """plan_carry with a LaterWay and `first` (the first spot's own carry): the planner's path first, as it
+    has been flown, asked what every carry is (the canister, its height all the way and what stands under
+    it). Where it passes, the very trajectory flown without the checks flies, point for point, and the walk
+    is not tried; where it does not, the arm's own walk, asked the same; where neither passes, the spot is
+    refused with both reasons. The walk that stands in for a planner's path that swings wide, or that
+    the planner refused for its limit margin, is asked the same. Every point of the planner's path is
+    asked, not its ends alone; the canister with the grip the way carries. The first spot's set-down is
+    not asked a leaning hand's way down."""
+    import copy
+
+    from conftest import leg as make_leg
+
+    from box_opening.runtime import approach
+
+    cfg = load_press_demo(PINK)
+    chain = _Walks()
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+
+    def plan(ctx_, state, name, target, world, speed):
+        """The planner's path: three points, its middle half way (joint_1 at q + 0.025)."""
+        lg = make_leg(name, start=list(state.joints), end=[v + 0.05 for v in state.joints], speed=speed, world=world[0])
+        mid = copy.deepcopy(lg.traj.points[0])
+        mid.positions = [v + 0.025 for v in state.joints]
+        lg.traj.points.insert(1, mid)
+        lg.target = target
+        return lg, state
+
+    monkeypatch.setattr(rp, "_plan_motion", plan)
+    drop = ContainerPose(xyz=(0.40, -0.30, -0.07), yaw=0.0)
+    q = [0.1] * 7
+    walk_end, planned_end, planned_mid = 0.11, 0.15, 0.125  # (the fake walk's end joints, and the fake planner's)
+    box, paths, descents, grips = {}, [], [], []
+
+    def low(ctx_, pts, held, q_grip=None):
+        grips.append(q_grip)
+        return box.get(round(pts[-1][0], 3))
+
+    monkeypatch.setattr(rlo, "lid_low_over_box", low)
+
+    class Way:
+        refuse = {}  # the path's last joint_1 -> why; or any point's of the path's middle (planned_mid)
+        q_grip = [0.3] * 7
+
+        def path(self, pts):
+            paths.append(round(pts[-1][0], 3))
+            for p in pts:
+                if round(p[0], 3) in self.refuse and (p is pts[-1] or round(p[0], 3) == planned_mid):
+                    return self.refuse[round(p[0], 3)]
+            return None
+
+        def descent(self, d, pts):
+            descents.append(d)
+            return "the hand leaning there would come 12 mm into what stands"
+
+    way = Way()
+    as_flown, why = rlo.plan_carry(ctx, cfg, q, drop)  # the first carry as it has been flown: nothing asked
+    assert why is None and paths == []
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, way=way, first=True)
+    assert why is None and not carry.legs[0].plan_free and chain.walks == []
+    assert _points(carry) == _points(as_flown) and paths == [planned_end]  # asked, and the same trajectory flies
+    assert len(carry.legs[0].traj.points) == 3 and grips == [[0.3] * 7]  # the canister with the way's grip
+    assert descents == [] and "the lid's way to" not in capsys.readouterr().out
+    # a path whose middle sinks, its two ends at carry height: asked of all its points, and walked
+    way.refuse = {planned_mid: "the lid would sink 30 mm under the height it is carried at on the way"}
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, way=way, first=True)
+    assert why is None and carry.legs[0].plan_free and len(chain.walks) == 1
+    way.refuse, paths[:], chain.walks[:] = {}, [], []
+    # its path sinks over the canister: the walk, asked the same, and the run says so
+    box[planned_end] = "the lid's lowest point would pass 30 mm under the top it came off, over the open canister"
+    paths.clear()
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, way=way, first=True)
+    assert why is None and carry.legs[0].plan_free and len(chain.walks) == 1 and paths == [walk_end]
+    assert (
+        "the planner's carry is no way for the lid (the lid's lowest point would pass 30 mm under the top it came "
+        "off, over the open canister): the arm's own walk instead"
+    ) in capsys.readouterr().out
+    # ... the walk sinking too: the spot refused with both reasons
+    way.refuse = {walk_end: "the lid would sink 40 mm under the height it is carried at on the way"}
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, way=way, first=True)
+    assert carry is None and why == (
+        "the carry (the lid's lowest point would pass 30 mm under the top it came off, over the open canister; "
+        "walked: the lid would sink 40 mm under the height it is carried at on the way)"
+    )
+    # its path passes something the map shows standing: the same, the walk where that passes, else refused
+    box.clear()
+    stands = "the lid would pass 25 mm inside what it must keep from what stands near [0.45, -0.20]"
+    way.refuse = {planned_end: stands}
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, way=way, first=True)
+    assert why is None and carry.legs[0].plan_free
+    way.refuse = {planned_end: stands, walk_end: stands}
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, way=way, first=True)
+    assert carry is None and why == "the carry (%s; walked: %s)" % (stands, stands)
+    # a planner's path that swings wide: the walk instead, as it has been — and the walk asked the same
+    way.refuse, paths[:] = {}, []
+    monkeypatch.setattr(rlo, "sanity_violations", lambda traj, margin: ["arm_joint_2 0.444 rad against 0.444"])
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, way=way, first=True)
+    assert why is None and carry.legs[0].plan_free and paths == [walk_end]
+    way.refuse = {walk_end: stands}
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, way=way, first=True)
+    swung = "the planner's carry swings wide (arm_joint_2 0.444 rad against 0.444)"
+    assert carry is None and why == "the carry (%s; walked: %s)" % (swung, stands)
+    monkeypatch.setattr(rlo, "sanity_violations", lambda traj, margin: [])
+    # a carry the planner refuses for its limit margin: walked, as it has been, and the walk asked the same
+    margin = RuntimeError("planning failed for lid:carry: MotionGenStatus.START_IN_LIMIT_MARGIN")
+    monkeypatch.setattr(rp, "_plan_motion", lambda *a: (_ for _ in ()).throw(margin))
+    way.refuse, paths[:] = {}, []
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, way=way, first=True)
+    assert why is None and carry.legs[0].plan_free and paths == [walk_end]
+    way.refuse = {walk_end: stands}
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, way=way, first=True)
+    assert carry is None and why.startswith("the carry (")
+    assert why.endswith("START_IN_LIMIT_MARGIN; walked: %s)" % stands)
+    monkeypatch.setattr(rp, "_plan_motion", plan)
+    # a carry after the first, the same checks: the walk first, as ever, and its set-down's way down asked
+    way.refuse, paths[:] = {}, []
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, way=way)
+    assert carry is None and why.startswith("the set-down (") and paths == [walk_end] and descents == [drop]
+    # the table every carry's way is asked over: the higher of the cameras' and the set-down's (the less room)
+    assert rlo.LaterWay.over(ctx, None, 0.20, 0.23, q).table_z == pytest.approx(0.23)
+    assert rlo.LaterWay.over(ctx, None, 0.23, 0.20, q).table_z == pytest.approx(0.23)
+    assert rlo.LaterWay.over(ctx, None, 0.20, None, q).table_z == pytest.approx(0.20)
 
 
 # flatbot's own robot file from the forearm out: the collision spheres of the forearm, the wrist's two links,
@@ -8675,23 +8852,26 @@ def test_in_the_run_the_lids_straight_way_from_a_spot_left_is_asked_of_every_nex
     assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
 
 
-def test_in_the_run_every_carry_after_the_first_is_asked_the_canister_and_its_own_path_and_the_first_is_not(
+def test_in_the_run_every_carry_is_asked_the_canister_and_its_own_path_the_first_too(
     ctx, monkeypatch, tmp_path, capsys
 ):
     """What plan_carry asks of a carry's own path — the canister under it (lid_low_over_box), its height
-    all the way and what stands under it (lid_way_refusal) — is asked of every carry the run plans once a
-    spot is left, and of none before: the first spot's carry is planned as it was flown before
-    2026-11-19 (of 22 recorded first carries 4 would not pass, the report's numbers). Here every later
+    all the way and what stands under it (lid_way_refusal) — is asked of every carry the run plans, the
+    first spot's too (of 22 recorded first carries 4 would not have passed: three sank 12-59 mm on the
+    way, one passed something standing). Here the first spot's path passes and flies; every later
     carry's path would sink: none is flown, each spot's refusal says so, and the lid goes back on the box."""
     later = _once_a_spot_is_left(monkeypatch)
-    asked = {"first": 0, "box": 0, "way": 0}
+    asked = {"first box": 0, "first way": 0, "box": 0, "way": 0}
 
-    def low(ctx_, pts, held):
-        asked["box" if later else "first"] += 1
+    def low(ctx_, pts, held, q_grip=None):
+        asked["box" if later else "first box"] += 1
         return None
 
     def sinks(ctx_, tmap, pts, held, table_z):
-        asked["way" if later else "first"] += 1
+        if not later:
+            asked["first way"] += 1
+            return None
+        asked["way"] += 1
         return "the lid would sink 40 mm under the height it is carried at on the way, to 110 mm over the table"
 
     monkeypatch.setattr(rlo, "lid_low_over_box", low)
@@ -8700,9 +8880,10 @@ def test_in_the_run_every_carry_after_the_first_is_asked_the_canister_and_its_ow
         ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
     )
     assert code == 1 and len(rec.setdowns) == 1 and "place:open" not in rec.events
-    assert asked["first"] == 0 and asked["box"] >= 1 and asked["way"] == asked["box"]
+    assert asked["first box"] >= 1 and asked["first way"] == asked["first box"]
+    assert asked["box"] >= 1 and asked["way"] == asked["box"]
     spots = [r for r in rows if r["leg"] == "lid_spot"]
-    assert spots[1]["xyz"] is None
+    assert spots[0]["xyz"] is not None and not spots[0]["refused"] and spots[1]["xyz"] is None
     # this arm has no walk: said, with why the planner's own path is no way either
     assert (
         "the carry (walked: no turning walk modelled; planned: the lid would sink 40 mm under the height it is "
@@ -8711,6 +8892,113 @@ def test_in_the_run_every_carry_after_the_first_is_asked_the_canister_and_its_ow
     out = capsys.readouterr().out
     assert "and no other spot on the table the cameras measured has a carry that plans" in out
     assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+
+
+SINKS = "the lid would sink 40 mm under the height it is carried at on the way, to 110 mm over the table"
+# the first carry refused for it on this arm, which has no walk
+FIRST_SINKS = "the carry (%s; walked: no turning walk modelled)" % SINKS
+
+
+def _first_paths_sink(monkeypatch, sink):
+    """lid_way_refusal answers SINKS where `sink(n)` says so of the n-th path it is asked (from 0), else
+    passes it. Returns the paths asked, each with whether the spot look had been taken when it was."""
+    asked, looked = [], []
+
+    def sinks(ctx_, tmap, pts, held, table_z):
+        asked.append(bool(looked))
+        return SINKS if sink(len(asked) - 1, bool(looked)) else None
+
+    monkeypatch.setattr(rlo, "lid_way_refusal", sinks)
+    return asked, lambda: looked.append(1)
+
+
+def test_in_the_run_a_first_spot_planned_ahead_whose_path_sinks_is_refused_and_the_next_is_planned_ahead(
+    ctx, monkeypatch, tmp_path
+):
+    """The first spot's carry planned ahead, while the hand comes down to the knob (CarrySearch, on the
+    map the spot was chosen on): its path sinks on the way, and this arm has no walk. That spot is
+    refused, with both reasons, and the next one's carry is planned ahead and flies as one motion with
+    the close and the lift."""
+    asked, _look = _first_paths_sink(monkeypatch, lambda n, looked: n == 0)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY)
+    assert code == 0 and "spot-look" not in rec.events and len(asked) == 2
+    (spot,) = (r for r in rows if r["leg"] == "lid_spot")
+    assert spot["refused"].endswith("]: " + FIRST_SINKS) and spot["refused"].count("]: ") == 1  # that one spot
+    first = [float(v) for v in spot["refused"][1 : spot["refused"].index("]")].split(", ")]
+    assert spot["xyz"][:2] != pytest.approx(first)  # the next spot, flown
+    assert spot["xyz"] == pytest.approx(list(rec.setdowns[0][0].xyz), abs=1e-4)
+
+
+def test_in_the_run_no_first_carry_that_passes_ahead_is_the_lift_alone_and_after_it_the_next_spot_where_one_sinks(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """Every first carry planned ahead sinks on the way (the grip's lookahead's, then the lift's): no
+    carry is planned ahead, and the lift and the clear fly alone, as where none was. After the spot look
+    the first spot's carry sinks too: that spot is refused with both reasons and the next is tried; its
+    carry passes and the lid goes down there."""
+    asked, look = _first_paths_sink(monkeypatch, lambda n, looked: not looked or asked.count(True) == 1)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, at_spot_look=look
+    )
+    assert code == 0 and rec.events[rec.events.index("lid:clear") + 1 :] == ["spot-look", *CARRY, *HOME]
+    assert asked.count(False) >= 2 and asked.count(True) == 2  # both lookaheads asked; after the look, two spots
+    (spot,) = (r for r in rows if r["leg"] == "lid_spot")
+    assert spot["ahead"]["flown"] is False and FIRST_SINKS in spot["ahead"]["why"]
+    assert spot["refused"].endswith("]: " + FIRST_SINKS) and spot["refused"].count("]: ") == 1  # one spot refused
+    assert "no spot whose carry and home both plan was found while the hand came down" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "aims, knuckle",
+    [([(BUTTON, 0.4), (UP, 9.0)], KNOB_ON), ([(BUTTON, 0.4), (UP, 9.0), (REGRIP, 9.0)], [AIR, KNOB_ON])],
+    ids=["first grip", "second grip"],
+)
+def test_in_the_run_the_carry_planned_ahead_is_asked_the_canister_under_the_lid_as_its_own_grip_takes_it(
+    ctx, monkeypatch, tmp_path, aims, knuckle
+):
+    """The canister's floor is the lid's top as the fingers take it, where that stands over the cameras'
+    top of the box (lid_low_over_box). The carry that flies merged with the close and the lift is planned
+    before that close, while ctx.lid_lifted is nothing (a first grip) or the last attempt's lift (a second
+    grip, the lid 10 mm lower): it is asked with the grip it is planned for, the one the lid is then lifted
+    from, as the same carry would be after the lift."""
+    real_low, real_top = rlo.lid_low_over_box, rlo._gripped_lid_top
+    floors, inside = [], []
+
+    def low(ctx_, pts, held, q_grip=None):
+        floors.append(None)  # (the cameras' top alone, unless the gripped top is asked)
+        inside.append(1)
+        try:
+            return real_low(ctx_, pts, held, q_grip=q_grip)
+        finally:
+            inside.pop()
+
+    def top(chain, q_grip):
+        if inside:
+            floors[-1] = [float(v) for v in q_grip]
+        return real_top(chain, q_grip)
+
+    monkeypatch.setattr(rlo, "lid_low_over_box", low)
+    monkeypatch.setattr(rlo, "_gripped_lid_top", top)
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, aims, knuckle=knuckle)
+    assert code == 0 and "spot-look" not in rec.events  # the carry planned ahead flew with the close and lift
+    assert floors and floors[-1] == pytest.approx(ctx.lid_lifted.q_grip)  # the grip the lid was lifted from
+
+
+def test_in_the_run_a_first_carry_planned_ahead_that_passed_flies_after_the_lift_and_is_not_asked_again(
+    ctx, monkeypatch, tmp_path
+):
+    """The carry planned while the lift flies (carry_ahead) is asked what every carry is, there; reused
+    after the lift — the arm within the drift gate of where it was planned from, the spot chosen its own
+    — it flies as planned, not planned or asked again (carry_refusal asks it the body check's boxes alone)."""
+    asked, look = _first_paths_sink(monkeypatch, lambda n, looked: False)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, at_spot_look=look, one_motion=False
+    )
+    assert code == 0 and "spot-look" in rec.events and len(rec.setdowns) == 1
+    (spot,) = (r for r in rows if r["leg"] == "lid_spot")
+    assert spot["ahead"]["flown"] is True
+    assert asked == [False]  # asked once, while the lift flew; not after the look
+    assert [name for name, _at in rec.plans].count("lid:carry") == 1
 
 
 def test_in_the_run_the_lid_goes_from_spot_to_spot_by_the_arms_own_walk_where_one_flies(

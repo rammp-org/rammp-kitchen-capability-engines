@@ -651,8 +651,9 @@ RUN_BUDGET_ENV = "BOX_OPENING_RUN_BUDGET"
 # table that is gone through (_offers, _thinned)
 WHOLE_TABLE_TRIES = 48
 WHOLE_TABLE = "the whole table"
-# What a carry flown with the lid is asked along the path it actually flies, once it is not the first
-# spot's own (lid_way_refusal; review of 2026-11-19). plan_carry asked a planned carry only of the
+# What a carry flown with the lid is asked along the path it actually flies, every carry the run plans
+# (lid_way_refusal; review of 2026-11-19; the first spot's own too since 2026-11-26: of the 22 first
+# carries on record 4 would not have passed). plan_carry asked a planned carry only of the
 # joint gate, the chair and its user and the box's footprint; the map only of the straight chord at
 # carry height (_offers' way); and the planner's world holds no table. On flatbot's URDF a joint-space
 # line between two hovers 0.35-0.85 m apart left that chord by 36-174 mm, and in two of seven pairs
@@ -890,13 +891,15 @@ def _lid_along(ctx, pts, held):
     return np.asarray(xy, float).reshape(-1, 2), np.asarray(low, float)
 
 
-def lid_low_over_box(ctx, pts, held):
+def lid_low_over_box(ctx, pts, held, q_grip=None):
     """Why the joint path `pts` would bring the held lid too low over the canister, or None:
     somewhere along it (between its waypoints too: _path_states) the lid's disc — level as the grip
     took it, the hand then at joints `held`, hanging LID_HANG_M lower than the model's cap
     (_lid_along) — stands over the box's footprint (round every place the run has the box:
     box_centres) with its lowest point under the top the lid came off: the cameras' top of the
-    box, or the lid's top as the fingers took it where that stands higher (_gripped_lid_top). The
+    box, or the lid's top as the fingers took it where that stands higher (_gripped_lid_top: the knob
+    held at joints `q_grip`; None, the lift's, ctx.lid_lifted — a carry planned ahead of the lift
+    has none of this grip's there yet: CarrySearch). The
     hover of every spot holds the lid CARRY_CLEAR_M over that top (Place.hover_for, _lean_setdown_poses);
     this asks it of the way between two hovers, and of a hand that leans further than any flown
     (SETDOWN_LEAN_MAX_DEG's note: the canister stands open under it)."""
@@ -906,7 +909,8 @@ def lid_low_over_box(ctx, pts, held):
     m = ctx.model
     over = container_half(m) + 0.5 * max(float(m.lid_dims[0]), float(m.lid_dims[1]))
     floor = float(ctx.cpose.xyz[2]) + float(m.dims[2])
-    q_grip = getattr(getattr(ctx, "lid_lifted", None), "q_grip", None)
+    if q_grip is None:
+        q_grip = getattr(getattr(ctx, "lid_lifted", None), "q_grip", None)
     if q_grip is not None:
         floor = max(floor, _gripped_lid_top(approach._chain(), q_grip))
     centres = box_centres(ctx)
@@ -1012,8 +1016,8 @@ def _hand_model():
         _HAND_MODEL_SAID.add(why)
         log.info(
             "[press_demo] %s: it is no model of the hand and wrist for the lid's further spots — no leaning "
-            "set-down is taken past the first spot's own, and a carry after the first is asked of the lid and "
-            "a hand straight down over it alone" % why
+            "set-down is taken past the first spot's own, and a carry is asked of the lid and a hand straight "
+            "down over it alone" % why
         )
     return None, why
 
@@ -1091,18 +1095,29 @@ def hand_way_refusal(ctx, tmap, pts, table_z):
 
 
 class LaterWay:
-    """What the carry to a spot and its set-down are asked beyond what the first spot's are, on the
-    map `tmap` over the table at `table_z`, the lid as the hand at joints `held` holds it — for a
-    spot of the wider search and for every spot after the first (SpotSearch):
+    """What a carry is asked of its own path, and a set-down beyond what the first spot's is, on the
+    map `tmap` over the table at `table_z`, the lid as the hand at joints `held` holds it — the path
+    of every carry the run plans (the first spot's: CarrySearch, SpotSearch.pick), the way down of a
+    spot of the wider search and of every spot after the first (SpotSearch):
       path(pts)           the carry's own path: lid_way_refusal, then the hand's own body along it,
                           hand_way_refusal (plan_carry asks the canister of it too,
                           lid_low_over_box);
       descent(drop, pts)  a leaning set-down's way down: hand_into_standing (a hand straight down
                           is the gate's own, clear_table.off_table's)."""
 
-    def __init__(self, ctx, tmap, table_z, held):
+    def __init__(self, ctx, tmap, table_z, held, q_grip=None):
         self.ctx, self.tmap, self.table_z = ctx, tmap, float(table_z)
         self.held = [float(v) for v in held]
+        # the joints the knob is gripped at, for the canister's floor (lid_low_over_box's; None: the lift's)
+        self.q_grip = None if q_grip is None else [float(v) for v in q_grip]
+
+    @classmethod
+    def over(cls, ctx, tmap, table_z, spot_z, held, q_grip=None):
+        """The LaterWay over the table the set-down goes by (`spot_z`: setdown_table_z's), or the
+        cameras' (`table_z`) where that stands higher — the less room of the two."""
+        heights = [float(z) for z in (table_z, spot_z) if z is not None]
+        # (no height at all: no table was measured, there is no map, and the height is in the words alone)
+        return cls(ctx, tmap, max(heights, default=0.0), held, q_grip)
 
     def path(self, pts):
         why = lid_way_refusal(self.ctx, self.tmap, pts, self.held, self.table_z)
@@ -3327,7 +3342,7 @@ def walk_carry(ctx, chain, q_from, hover, quat, world):
     return dp.compliant_line(ctx, "lid:carry", pts, quat, rp.free_line_speed(ctx), world), None
 
 
-def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False, way=None):
+def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False, way=None, first=False):
     """The carry from joints `q_from` (where the spot look stands) to the
     spot `drop` (planned in the planner's own world, worlds.PLANNER_WORLD:
     it is told nothing of the box or the table; where it refuses the start
@@ -3349,7 +3364,14 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False, way=None):
     between two hovers can sink a hand's width under them), and a leaning
     set-down's way down of `way.descent`. A planned carry refused for the
     canister with no `way` is flown as the walk where that clears it, before
-    the spot is refused. Returns (Carry, None) or (None, why)."""
+    the spot is refused.
+
+    `first`, with a `way` (the first spot's own carry: CarrySearch,
+    SpotSearch.pick): the planner's path first, as it has been flown, and
+    where it passes the same checks (the canister, `way.path`) it flies as
+    planned; where it does not, the walk, asked the same, before the spot is
+    refused with both reasons. Its set-down is the first spot's, not asked
+    `way.descent`. Returns (Carry, None) or (None, why)."""
     from box_opening.runtime import approach
     from box_opening.runtime import kinematics as kin
 
@@ -3359,13 +3381,14 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False, way=None):
     held = q_from if held is None else [float(v) for v in held]
     quat, contact, hover = setdown_poses(ctx, drop, held=held)
     asked = over_box or way is not None or _spot_lean(drop) > SETDOWN_LEAN_DEG
+    later = way is not None and not first  # the walk first, and a leaning set-down's way down asked
 
     def too_low(leg):
         """Why `leg`'s own path is no way for the lid here (the canister; `way`'s height and what stands), or None."""
         if not asked or leg.traj is None:
             return None
         pts = [list(p.positions) for p in leg.traj.points]
-        why = lid_low_over_box(ctx, pts, held)
+        why = lid_low_over_box(ctx, pts, held, q_grip=None if way is None else way.q_grip)
         return why if why is not None or way is None else way.path(pts)
 
     def walk():
@@ -3375,7 +3398,7 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False, way=None):
         return (leg if why is None else None), why
 
     carry, walked, no_walk = None, False, None
-    if way is not None:
+    if later:
         carry, no_walk = walk()
         walked = carry is not None
     if carry is None:
@@ -3384,7 +3407,7 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False, way=None):
                 ctx, PlanState(joints=q_from, chain=0), "lid:carry", ("pose", hover, quat), world, TRANSIT_SPEED
             )
         except RuntimeError as e:
-            if way is not None:
+            if later:
                 return None, "the carry (walked: %s; planned: %s)" % (no_walk, rp._short(e))
             if not any(code in str(e) for code in CARRY_WALK_ON):
                 return None, "the carry (%s)" % rp._short(e)
@@ -3403,7 +3426,7 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False, way=None):
         bad = sanity_violations(carry.traj, SANITY_MARGIN_RAD)
         if bad:
             swung = "the planner's carry swings wide (%s)" % "; ".join(bad)
-            if way is not None:
+            if later:
                 return None, "the carry (walked: %s; planned: %s)" % (no_walk, swung)
             carry, why = walk()
             if carry is None:
@@ -3421,7 +3444,7 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False, way=None):
             # (from one spot to the next the way may cross the box and the table, and a hand leaning past
             # SETDOWN_LEAN_DEG hangs the lid's low edge lower than any carry flown)
             low = too_low(carry)
-            if low is not None and way is None:
+            if low is not None and not later:
                 # the walk before the spot is refused: on 2026-11-17 16:40's map the joint-space way to every
                 # further spot brought the lid under the canister's top, and the walk to each cleared it
                 carry, why = walk()
@@ -3434,10 +3457,10 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False, way=None):
             else:
                 why = low
         if why is not None and not walked:
-            if way is not None:
+            if later:
                 return None, "the carry (walked: %s; planned: %s)" % (no_walk, why)
             return None, "the carry (%s)" % why
-    if way is not None:
+    if later:
         log.info(
             "[press_demo] the lid's way to [%.2f, %.2f] is %s"
             % (
@@ -3465,7 +3488,7 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False, way=None):
             return None, "%s (%s)" % (name, why)
         lines.append([[float(v) for v in p] for p in pts])
         q = lines[-1][-1]
-    if way is not None:
+    if later:
         # a leaning hand's own body, down the lines it flies, and what stands on the table (LaterWay.descent)
         why = way.descent(drop, lines[0] + lines[1])
         if why is not None:
@@ -5013,7 +5036,17 @@ class CarrySearch:
     room (room_for), the map and the first spot the hand reaches, no plan;
     finish(): the carry (and home after it) planned to that spot, the next
     ones tried where it is refused, and the CarryAhead — what carry_ahead
-    returns, its spent_s both parts' time."""
+    returns, its spent_s both parts' time.
+
+    Where finish runs, and with it the checks of each carry's own path
+    (plan_carry's `first`): with the grip straight from the press and its
+    way down watched (GRIP_FROM_PRESS, GRIP_TOUCH: the default), with the
+    arm standing at the rise's top before it comes down to the knob
+    (_grip_ahead_at_top), so their time is added to that stop; without
+    GRIP_TOUCH while the unwatched way down flies (grip_ahead_down); from
+    the look pose while the way in to the knob flies (grip_ahead); and
+    where none of those planned a carry, while the lift and the clear fly
+    (carry_ahead, _close_and_carry)."""
 
     def __init__(self, ctx, cfg, eyes, q_end, room=None, home=False, q_grip=None):
         self.ctx, self.cfg, self.eyes, self.room, self.home = ctx, cfg, eyes, room, home
@@ -5069,13 +5102,18 @@ class CarrySearch:
     def finish(self):
         t0 = time.monotonic()
         ctx, ahead = self.ctx, self.ahead
+        # the carry's own path asked on the map the spot was chosen on, the lid as it hangs where the clear
+        # ends, the canister's floor the lid's top as this grip takes it (ctx.lid_lifted is not this grip's
+        # yet, ahead of the close): what the carry chosen after the lift would be asked (SpotSearch.way,
+        # held: _close_and_carry)
+        way = LaterWay.over(ctx, ahead.tmap, ahead.table_z, ahead.spot_z, self.q, q_grip=self.q_grip)
         while self._next is not None:
             if len(ahead.refused) >= CARRY_TRIES:
                 break
             drop, tier, says = self._next
             _abort_check(ctx)
             t = time.monotonic()
-            carry, why = plan_carry(ctx, self.cfg, self.q, drop)
+            carry, why = plan_carry(ctx, self.cfg, self.q, drop, way=way, first=True)
             after = None
             if carry is not None and self.home:
                 _abort_check(ctx)  # a plan cut short by the Ctrl+C is no refusal: never the next spot
@@ -5585,9 +5623,11 @@ class SpotSearch:
          the wrist looks from here (look_again), its frame is pooled in, and 1 and 2 once more.
     Nothing: no spot is left, and the caller's last resort is the box (put_lid_back).
 
-    Every carry but the first spot's own from the tiers (planned as it was before 2026-11-19) is
-    asked what a LaterWay asks: the arm's own walk first, its path at carry height over the table
-    and over what stands on it, a leaning set-down's hand out of what stands (plan_carry's `way`).
+    Every carry is asked what a LaterWay asks of its path: at carry height over the table, over
+    what stands on it, off the canister (plan_carry's `way`). Every one but the first spot's own
+    from the tiers is the arm's own walk first and its leaning set-down's hand is asked out of what
+    stands; the first spot's own is the planner's path first, as it has been flown, the walk only
+    where that path does not pass (plan_carry's `first`).
 
     The run's clock is asked all through the choice of a spot after the first — before it begins,
     of every spot looked at, before each reach check and before each plan — and through the wider
@@ -5718,10 +5758,10 @@ class SpotSearch:
     def way(self, held=None):
         """The LaterWay a carry of this search is asked (the lid as the hand at `held` holds it:
         this search's own where it has one): the table the set-down goes by, or the cameras' where
-        that stands higher — the less room of the two."""
-        heights = [float(z) for z in (self.table_z, self.spot_z) if z is not None]
-        # (no height at all: no table was measured, there is no map, and the height is in the words alone)
-        return LaterWay(self.ctx, self.tmap, max(heights, default=0.0), self.held if self.held is not None else held)
+        that stands higher — the less room of the two (LaterWay.over)."""
+        return LaterWay.over(
+            self.ctx, self.tmap, self.table_z, self.spot_z, self.held if self.held is not None else held
+        )
 
     def pick(self, runner, q, ahead=None, off=None):
         """The first spot whose carry plans from joints `q` (the class's note), as a Picked.
@@ -5765,8 +5805,8 @@ class SpotSearch:
                 t = time.monotonic()
                 if wider or later:
                     carry, why = plan_carry(ctx, self.cfg, q, drop, held=held, over_box=True, way=way)
-                else:  # the first spot's own, from the tiers: planned as it was before 2026-11-19
-                    carry, why = plan_carry(ctx, self.cfg, q, drop)
+                else:  # the first spot's own, from the tiers: the planner's way first, asked what the rest are
+                    carry, why = plan_carry(ctx, self.cfg, q, drop, way=way, first=True)
                 out.carry_s += time.monotonic() - t
                 if carry is not None:
                     out.carry, out.chosen = carry, (drop, tier, says)
