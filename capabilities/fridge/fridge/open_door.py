@@ -1452,6 +1452,7 @@ def execute_open(ai, planner, plan, *, fast=False):
             "swing",
             impedance={**F.PULL_GAINS, "path_tol": F.PULL_PATH_TOL_RAD},
             tol=F.SWING_END_TOL_M,
+            settle_for_release=True,
         )
     finished = planner.finished  # the driver ran the whole swing (no stop), wherever the hand ended
     final = ai.get_state()
@@ -1539,6 +1540,7 @@ class _AfterPull:
         door = load_door()
         say(f"  {P.after_release(self, planner, ai, door)}")
         planner.join(self.motion, FridgeModel(door).cabinet())
+        P.wait_until_still(ai)
         if isinstance(self, HookBackOff):
             margin = planner.limit_margin(self.motion.joined.q)
             if margin < HOOK_EXIT_LIMIT_MARGIN_DEG:

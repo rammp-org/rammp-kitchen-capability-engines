@@ -50,6 +50,7 @@ RAISED_RETRIES = 1  # a leg whose cuRobo plan raised (status EXCEPTION, not a pl
 # ... and so is one whose start cuRobo calls INVALID_START_STATE_UNKNOWN_ISSUE (planning._leg)
 KEYPOINT_TOL_M = 0.015  # a motion counts as done with the tool this close to its last goal
 CONTACT_SPEED = 0.5  # a contact leg (`contact`) runs at this fraction of the free-space speed
+SETTLE_SPEED_RAD_S = 0.02
 SETTLE_S = 0.3  # after a motion, let the arm's state catch up
 
 
@@ -594,7 +595,7 @@ class Planner:
         return float(motion.joined.t[int(np.argmin(np.linalg.norm(pos - np.asarray(point, float), axis=1)))])
 
     @timing.timed(lambda self, motion, label, *args, **kwargs: f"arm_motion:{label}")
-    def run(self, motion, label, impedance=None, events=(), tol=KEYPOINT_TOL_M):
+    def run(self, motion, label, impedance=None, events=(), tol=KEYPOINT_TOL_M, *, settle_for_release=False):
         """Run the joined `motion` (join first). Refuses if the arm has moved since it was planned. `impedance`: run it
         compliant -- the driver's joint impedance with these gains ({kq, zeta, torque_limit}, + path_tol: the tracking
         limit, rad) instead of stiff position control. `events`: [(t s into the trajectory, fn)] called while it runs (a
@@ -644,10 +645,12 @@ class Planner:
                 break
             speed = np.max(np.abs(st["velocity"]))
             joint_error = np.max(np.abs(_short_delta(plan.q[-1], st["position"])))
-            if err <= tol and speed <= 0.02 and joint_error <= np.radians(1):
+            if err <= tol and speed <= SETTLE_SPEED_RAD_S and joint_error <= np.radians(1):
                 break
             self.checkpoint()
             time.sleep(0.02)
+        if settle_for_release and np.any(np.abs(st["velocity"]) > SETTLE_SPEED_RAD_S):
+            raise Refused(f"{label}: the arm is still moving after settling -- stopping before release.")
         say(f"{label}: done, tool {err * 100:.1f} cm from the last goal")
         return err <= tol
 
