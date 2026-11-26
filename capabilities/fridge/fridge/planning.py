@@ -25,7 +25,6 @@ from functools import partial
 
 import numpy as np
 import rammp_arm
-from capability_engine.driver_state import ArmError
 from capability_engine.driver_state import Refused as ArmRefused
 from door_common import timing
 from door_common.common import Refused, say
@@ -53,31 +52,6 @@ KEYPOINT_TOL_M = 0.015  # a motion counts as done with the tool this close to it
 CONTACT_SPEED = 0.5  # a contact leg (`contact`) runs at this fraction of the free-space speed
 SETTLE_SPEED_RAD_S = 0.02
 SETTLE_S = 0.3  # after a motion, let the arm's state catch up
-
-
-def settle_error(arm, *, after=None, state=None):
-    """Use receipt age when the arm exposes it, otherwise validate the adapter's velocity vector."""
-    read_joints = getattr(arm, "joint_states", None)
-    if callable(read_joints):
-        read_started = time.monotonic()
-        try:
-            joints = read_joints()
-        except ArmError:
-            return "joint velocity feedback is unavailable"
-        if after is not None and not 0 <= getattr(joints, "age_s", float("nan")) < read_started - after:
-            return "joint velocity feedback was not received after the trajectory result"
-        velocity = getattr(joints, "velocity", None)
-    else:
-        velocity = (arm.get_state() if state is None else state).get("velocity")
-    try:
-        velocity = np.asarray(velocity, dtype=float)
-    except (TypeError, ValueError):
-        return "joint velocity feedback is invalid"
-    if velocity.shape != (len(JOINTS),) or not np.all(np.isfinite(velocity)):
-        return "joint velocity feedback is invalid"
-    if np.any(np.abs(velocity) > SETTLE_SPEED_RAD_S):
-        return "the arm is still moving after settling"
-    return None
 
 
 class StartNotClear(Refused):
@@ -200,8 +174,6 @@ class Planner:
         self.last_failure = {}
         self.plans = 0
         self.feedback_settle = False
-        self.result_at = None
-        self.release_settle_error = None
         self.finished = False  # the last run(): the driver ran the whole trajectory (no stop), wherever the tool ended
         self.cached = 0
         self.local = 0  # legs solved here (on or along the door)
@@ -648,12 +620,10 @@ class Planner:
             )
         thread = _timed_events(events, self.say_error) if events else None
         res = None
-        self.result_at = self.release_settle_error = None
         try:
             res = self.arm.execute_joint_trajectory(
                 JOINTS, [(float(t), q, qd) for t, q, qd in zip(plan.t, plan.q, plan.qd, strict=True)], **kw
             )
-            self.result_at = time.monotonic()
         finally:
             if thread is not None:
                 if res is None or res.error_code != 0:
@@ -671,20 +641,16 @@ class Planner:
         while True:
             st = self.arm.get_state()
             err = float(np.linalg.norm(np.asarray(st["ee_pos"][:3]) - motion.goals[-1].pos))
-            if settle_for_release:
-                self.release_settle_error = settle_error(self.arm, after=self.result_at, state=st)
             if not self.feedback_settle or time.monotonic() >= until:
                 break
-            still = (
-                self.release_settle_error is None
-                if settle_for_release
-                else np.max(np.abs(st["velocity"])) <= SETTLE_SPEED_RAD_S
-            )
+            speed = np.max(np.abs(st["velocity"]))
             joint_error = np.max(np.abs(_short_delta(plan.q[-1], st["position"])))
-            if err <= tol and still and joint_error <= np.radians(1):
+            if err <= tol and speed <= SETTLE_SPEED_RAD_S and joint_error <= np.radians(1):
                 break
             self.checkpoint()
             time.sleep(0.02)
+        if settle_for_release and np.any(np.abs(st["velocity"]) > SETTLE_SPEED_RAD_S):
+            raise Refused(f"{label}: the arm is still moving after settling -- stopping before release.")
         say(f"{label}: done, tool {err * 100:.1f} cm from the last goal")
         return err <= tol
 
