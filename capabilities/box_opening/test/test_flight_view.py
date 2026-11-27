@@ -735,6 +735,51 @@ def test_the_view_never_stops_the_reader_that_feeds_it():
 
 
 @pytest.mark.parametrize(
+    "said, note",
+    [
+        (
+            "PUSH: 8 steps straight down to ~10 N from where the pads met the button, the pads 0.4 mm higher and "
+            "0.0 mm aside: the button still came back up after 8 steps; the springs let go",
+            "pushed straight down to 10 N (8 steps), the pads came back up 0.4 mm: the button still came back up "
+            "after 8 steps; the springs let go",
+        ),
+        (  # an older log's: the signed figure, "lower" (before final gate R5)
+            "PUSH: 8 steps straight down to ~10 N from where the pads met the button, the pads -0.4 mm lower and "
+            "0.0 mm aside: the button still came back up after 8 steps; the springs let go",
+            "pushed straight down to 10 N (8 steps), the pads came back up 0.4 mm: the button still came back up "
+            "after 8 steps; the springs let go",
+        ),
+        (
+            "PUSH: 2 steps straight down to ~10 N from where the pads met the button, the pads 1.2 mm lower and "
+            "0.0 mm aside: the button held",
+            "pushed straight down to 10 N (2 steps), the button went 1 mm: the button held",
+        ),
+        (
+            "PUSH: step 1 stopped part-way from where the pads met the button, the pads 0.3 mm higher and 0.0 mm "
+            "aside: PATH_TOLERANCE_VIOLATED",
+            "the push's first step stopped part-way, the pads 0.3 mm higher: PATH_TOLERANCE_VIOLATED",
+        ),
+        (
+            "PUSH: step 1 stopped part-way from where the pads met the button, the pads -0.3 mm lower and 0.0 mm "
+            "aside: PATH_TOLERANCE_VIOLATED",
+            "the push's first step stopped part-way, the pads 0.3 mm higher: PATH_TOLERANCE_VIOLATED",
+        ),
+    ],
+    ids=["came back up", "came back up, an old log", "gave", "stopped higher", "stopped higher, an old log"],
+)
+def test_a_push_whose_pads_came_back_up_is_said_to_have_come_up(said, note):
+    """Final gate R5: the console's PUSH lines give the pads' rise as a magnitude and "higher" (since R5),
+    an older log's as a signed figure and "lower". The flight view reads both, and says which way the pads
+    went: up, or the button down."""
+    out = []
+    view = FlightView(write=out.append, clock=lambda: 0.0)
+    view.start()
+    view.feed(P + "ONE MOTION from the look pose to below the button: depth:approach, depth:press")
+    view.feed(P + said)
+    assert out[-1].rstrip() == "             note  " + note
+
+
+@pytest.mark.parametrize(
     "stop, step",
     [
         ("the way home stopped during home (path tolerance) — the arm holds", "HOME"),

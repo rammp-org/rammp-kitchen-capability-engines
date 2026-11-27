@@ -5196,27 +5196,35 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
             return _close_and_carry(
                 ctx, cfg, runner, eyes, None, quat, attempt, room, back_out, miss, closed=True, gripped=grip[-1].detail
             )
-        if len(moves) <= 1 and not _started(last):
+        # no lift said it moved: a goal the run or the client never sent, or the driver rejected
+        # (_never_taken), moved nothing; one the driver took and the client then lost word of (a stop it did
+        # not confirm, the watchdog, no result) may be lifting the lid: the arm holds it as below, the
+        # springs not let go
+        moved = len(moves) > 1 or _started(last)
+        if not moved and _never_taken(ctx, lift.legs, last):
             # nothing moved: the knob in the fingers, the lid still on the canister
             return back_out(
                 "the lift did not start (%s) — the lid is let go where it lies, on the box"
                 % (last.detail or last.outcome)
             )
         if SLIP_CHECK:
-            # stopped part way up, the fingers never read at a top: the knob was held at the close, and the
-            # record says the lid is in them, as it did with the close and all after it one execution
+            # stopped part way up, or lost word of, the fingers never read at a top: the knob was held at the
+            # close, and the record says the lid is in them, as it did with the close and all after it one
+            # execution
             said = gripped if closed else grip[-1].detail
             runner.note("reach_grip_result", ok=True, detail=said, attempt=attempt)
             log.info("[press_demo] LID GRIPPED — %s" % said)
         log.info(
-            "[press_demo] STOP: the %s stopped during %s (%s) — the arm holds the lid"
+            "[press_demo] STOP: the %s %s during %s (%s) — the arm holds the lid"
             % (
                 "lid's way from the box to the table" if one and not SLIP_CHECK else "lift",
+                "stopped" if moved else "did not start",
                 rp._in_flight(lifting if SLIP_CHECK else flying, last, runner.last_retime),
                 last.detail or last.outcome,
             )
         )
-        rp.let_go(ctx)
+        if moved:
+            rp.let_go(ctx)
         return 1
     if SLIP_CHECK:
         held, shut, detail = _lift_top(ctx, cfg, runner, attempt)

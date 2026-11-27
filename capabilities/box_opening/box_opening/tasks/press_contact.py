@@ -92,7 +92,9 @@ CONTACT_SLOW_RISE_M = 0.005
 CONTACT_ONSET_M = 0.001
 HISTORY_S = 3.0  # how far back the onset is looked for
 # The stroke ends as far past the contact as it was planned past the top
-# (PressContact.past_m), never deeper than planned. False: watched only, nothing cut
+# (PressContact.past_m), never deeper than planned. False: watched only, nothing cut — the press's, and
+# the grip's and the set-down's touch cuts too (PressContact.cut). Not the way back to the press as flown:
+# that is depth_press.PRESS_BY_FORCE = False alone
 PRESS_FROM_CONTACT = True
 # a cut shallower than this leaves the planned end: not worth a cancel
 CUT_MIN_M = 0.001

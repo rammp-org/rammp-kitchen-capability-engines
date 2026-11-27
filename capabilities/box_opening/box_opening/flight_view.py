@@ -123,11 +123,15 @@ PRESS_LEAN = re.compile(r"^PRESS \(compliant\), the hand leaning (\d+) deg")
 CONTACT = re.compile(r"^CONTACT: the pads met the box at [\d.]+, ([-+]?\d+) mm from the top")
 PRESSED = re.compile(r"^PRESSED with ~(\d+) N")
 # the push after the stroke stopped where the pads met the button (tasks/depth_press.push_down): its steps,
-# the force, how far the pads went down, and why it ended
-PUSH = re.compile(r"^PUSH: (\d+) steps? straight down to ~(\d+) N .*?, the pads (-?[\d.]+) mm lower .*?: (.*)$")
+# the force, how far the pads went down or came back up ("lower", "higher"; an older log's lower is signed),
+# and why it ended
+PUSH = re.compile(
+    r"^PUSH: (\d+) steps? straight down to ~(\d+) N .*?, the pads (-?[\d.]+ mm (?:lower|higher)) .*?: (.*)$"
+)
 PUSH_NONE = re.compile(r"^PUSH: none from where the pads met the button: (.*)$")
 PUSH_STOPPED = re.compile(
-    r"^PUSH: step 1 stopped part-way from where the pads met the button, the pads (-?[\d.]+) mm lower .*?: (.*)$"
+    r"^PUSH: step 1 stopped part-way from where the pads met the button, the pads (-?[\d.]+ mm (?:lower|higher)) "
+    r".*?: (.*)$"
 )
 # the sight before the stroke (tasks/reach_press.fly_press_way_in): followed, how far the button was from the
 # aim and how far the pads were brought (all the way, or part of it and why not all); not followed, why (the
@@ -205,7 +209,8 @@ ASKS_TO_BE_GUIDED = "the run asks for the chair to be guided"
 REST_DOING = "going to rest before the chair is guided"
 RUNNER_STOP = re.compile(r"^STOP: leg \S+ -> ")  # the runner's own word on one leg: the task's line says what it means
 
-# a leg named in a STOP ("... stopped during lid:carry (...)") -> the step it is
+# a leg named in a STOP ("... stopped during lid:carry (...)", "... did not start during lid:lift") -> the
+# step it is
 LEG_STEPS = (
     ("survey:", "FIND"),
     ("reach:look", "LOOK"),
@@ -219,7 +224,7 @@ LEG_STEPS = (
     ("place:", "HOME"),
     ("home", "HOME"),
 )
-DURING = re.compile(r"(?:stopped during|in) ([a-z]+:[a-z-]+|home)\b")
+DURING = re.compile(r"(?:(?:stopped|did not start) during|in) ([a-z]+:[a-z-]+|home)\b")
 
 
 # "30 deg: <why that tilt's press does not plan>", as plan_reach joins them (tasks/reach_press)
@@ -348,6 +353,20 @@ def _plain(stop, out_m):
         return "stopped part way (%s)" % m.group(1)[:50]
     short = re.split(r" \(| — |: ", stop, maxsplit=1)[0].strip()
     return short[:60] + ("..." if len(short) > 60 else "")
+
+
+def _pads_down_mm(said):
+    """How far down the pads went, mm, from a PUSH line's "0.4 mm lower" or "0.4 mm higher" (up: below
+    0); an older log's "-0.4 mm lower" reads as up too."""
+    mm, way = said.split(" mm ")
+    return (float(mm) if way == "lower" else -float(mm)) + 0.0  # (+ 0.0: "-0.0 mm lower" says 0, not -0)
+
+
+def _pads_went(said):
+    """A PUSH line's "N mm lower|higher" as the view says it: the button went N mm (down), or the pads came
+    back up N mm."""
+    down = _pads_down_mm(said)
+    return "the button went %.0f mm" % down if down >= 0.0 else "the pads came back up %.1f mm" % -down
 
 
 class FlightView:
@@ -651,14 +670,8 @@ class FlightView:
             # said at once, under the press's line: whatever the hold reads after it (PRESSED, NOTHING
             # PRESSED) or a STOP, the push is shown
             self._note(
-                "pushed straight down to %s N (%d step%s), the button went %.0f mm: %s"
-                % (
-                    m.group(2),
-                    steps,
-                    "" if steps == 1 else "s",
-                    float(m.group(3)),
-                    m.group(4),
-                )
+                "pushed straight down to %s N (%d step%s), %s: %s"
+                % (m.group(2), steps, "" if steps == 1 else "s", _pads_went(m.group(3)), m.group(4))
             )
             return
         m = PUSH_NONE.match(s)
@@ -667,9 +680,12 @@ class FlightView:
             return
         m = PUSH_STOPPED.match(s)
         if m:
-            self._note(
-                "the push's first step stopped part-way, the button %.0f mm down: %s" % (float(m.group(1)), m.group(2))
-            )
+            down = _pads_down_mm(m.group(1))
+            if down >= 0.0:
+                how = "the button %.0f mm down" % down
+            else:
+                how = "the pads %.1f mm higher" % -down
+            self._note("the push's first step stopped part-way, %s: %s" % (how, m.group(2)))
             return
         m = PRESSED.match(s)
         if m:

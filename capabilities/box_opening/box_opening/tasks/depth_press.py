@@ -46,8 +46,9 @@ A COMPLIANT press (press_compliant, and the reach-out's one execution) has
 none of the above but the turn: one stroke down in the driver's joint
 impedance, watched. With PRESS_BY_FORCE (not flown) it stops where the pads
 meet the button and pushes from there (push_down): the springs' reference
-set, from the arm as it stands, to where they push COMPLIANT_PRESS_N straight
-down on the pads, again where the button gives; then held and read
+set, from the arm as it stands, to where they push straight down on the
+pads, never more than COMPLIANT_PRESS_N, again where the button gives or
+comes back up; then held and read
 (compliant_hold), and back up. Off, as flown to 2026-11-20: the stroke ends
 as far past the contact as it was planned past the top, bent to push
 straight down at the button's modelled bottom.
@@ -282,9 +283,11 @@ BEND_MIN_DROP_M = 0.001
 # straight below the contact: pushing sideways too (fingertip_compliance), and, held `travel + over`
 # below the contact where the pink box's button bottoms after 7.5 mm of its 12, about 18 N, not 10.
 # With this on, the stroke is cut where the pads meet the button (watch_press: past_m 0) and push_down
-# sets the reference, from the arm as it stands, to where the springs push COMPLIANT_PRESS_N straight
-# down on the pads where they are. Off, the press is as it flew to 2026-11-20 (bc3c880): the only one
-# that has flown, kept to go back to at the bench with this one edit
+# sets the reference, from the arm as it stands, to where the springs push straight down on the pads
+# where they are, never more than COMPLIANT_PRESS_N (each step PUSH_BACK_M's worth under it). Off, the
+# press is as it flew to 2026-11-20 (bc3c880): the only one that has flown, kept to go back to at the
+# bench with this one edit. This switch alone: not press_contact.PRESS_FROM_CONTACT, which also turns
+# off the grip's and the set-down's touch cuts
 PRESS_BY_FORCE = True
 
 
@@ -302,19 +305,29 @@ def push_on():
 # on a button are stiffer straight down than free ones (1 / C_zz, ~1600-1850 N/m): pinned there, they
 # cannot slide aside. Measured on the Gen3's chain (RIGID, the pads pinned): ~2800 N/m at the tests' press
 # pose 0.47 m out (test_depth_press's gen3), ~1950 at 0.62 m. The arithmetic takes K ~2800, the worse for
-# both bounds below (smaller steps, a larger shortfall). A step sets the reference to push F
-# (COMPLIANT_PRESS_N, 10 N) on pads that stand still; a
-# button that resists r N gives under it until the springs push r, (F - r) / K: 1.4 mm a step at 6 N,
-# 0.7 at 8 N. At most this many steps: 8 push a 7.5 mm travel through where it resists ~7.3 N or less
-# along it ((10 - 7.3) x 8 / 2800 = 7.7 mm), and stop on one that resists more (end "steps", or "held"
-# below)
+# both bounds below (smaller steps, a larger shortfall). A step sets the reference to push
+# F - K x PUSH_BACK_M (F COMPLIANT_PRESS_N, 10 N: ~9.4 N, the ceiling never reached) on pads that stand
+# still; a button that resists r N gives under it until the springs push r, (9.4 - r) / K: 1.2 mm a step
+# at 6 N, 0.5 at 8 N. At most this many steps: 8 push a 7.5 mm travel through where it resists ~6.8 N or
+# less along it ((9.4 - 6.8) x 8 / 2800 = 7.5 mm), and stop on one that resists more (end "steps", or
+# "held" below)
 PUSH_STEPS = 8
 # the pads going down more than this during a step: the button gave and the force fell with it, so the
-# next step sets the reference again. 0.5 mm is ~1.4 N at K: the most the final force may fall short. So a
-# button that needs within ~1.5 N of F along its travel gives less than this a step and is not pushed
-# through: the push ends "held" where it stands, the record says how far it went down — reported, never
-# forced
+# next step sets the reference again. 0.5 mm is ~1.4 N at K, on the step's own ~0.6 N short of F: the
+# final force falls short of F by at most K x (PUSH_GIVE_M + PUSH_BACK_M), ~2.0 N, so a held push stands
+# at ~8.0 to 10.0 N. A button that needs more than ~8 N along its travel gives less than this a step and
+# is not pushed through: the push ends "held" where it stands, the record says how far it went down —
+# reported, never forced
 PUSH_GIVE_M = 0.0005
+# Each step's reference is set this much short of where F would hold the pads where they stand (F less
+# K x this, ~0.6 N at K): pads that then stand up to this much ABOVE where it was set for (what is under
+# them came back up as the step took force off) are pushed F at the most, never more. Standing higher
+# still, the springs push F + K x (the rise - this), past the owner's 10 N, and the next step sets the
+# reference again from there. The cut leaves the reference over the cap, so the first step takes force
+# off. With an excess e at the cut on a stop of stiffness k the first rise is e / (K + k), and each
+# further step leaves K / (K + k) of the last: one or two steps on a stiff stop (e 3 N, k 5000 N/m:
+# 0.38 mm, then 0.14), PUSH_STEPS and a let-go on one much softer than the arm
+PUSH_BACK_M = 0.0002
 # A step starts at the reference the driver holds (a reference that jumps up to the pads could let a
 # push-push latch go, and the push shut it again), unless that is farther than this from the measured
 # joints (largest joint difference): then this far from them, toward it. Under the runner's
@@ -1504,7 +1517,8 @@ class PressPush:
     holding, the one the hold reads the springs' pull toward; `steps`
     flown; how far the pads went `down_m` and `aside_m` from where they
     stood when it began; and why it ended, `end` (held: the button held
-    under the last step; steps: PUSH_STEPS flown; refused: the rule's
+    under the last step; steps: PUSH_STEPS flown, the pads still going
+    down or back up; refused: the rule's
     refusals, spring_end's; not started: the runner or the driver refused
     a step; stopped: a step stopped part-way; through: the pads went past
     the button's travel; slid: the pads went sideways) and `why`, its
@@ -1522,7 +1536,9 @@ class PressPush:
     stopped: str = ""  # a step that stopped part-way: which, and the runner's words ("": none did)
 
     def record(self):
-        """The run record's 'push' (depth_compliant_press)."""
+        """The run record's 'push' (depth_compliant_press). `force_n` is the
+        ceiling the push stands at or under (each step is set PUSH_BACK_M's
+        worth below it), not the force a step asks."""
         return dict(
             steps=self.steps,
             force_n=min(COMPLIANT_PRESS_N, COMPLIANT_PRESS_MAX_N),
@@ -1545,24 +1561,30 @@ def push_down(ctx, cfg, runner, stroke, held_ref):
     holds — never jumping up to the pads, which could let a push-push latch
     go; PUSH_START_MAX_RAD from the measured joints toward it where it
     stands farther, under the runner's drift gate — to
-    q - F Kq^-1 J_z(q)^T (spring_end), q the arm's measured joints on the
-    reference's side of the wrap and F COMPLIANT_PRESS_N, never past
-    COMPLIANT_PRESS_MAX_N: held at q, the springs push F straight down at
-    the pads, whatever the compliance couples. The first step is worked
+    q - F' Kq^-1 J_z(q)^T (spring_end), q the arm's measured joints on the
+    reference's side of the wrap and F' = F - K PUSH_BACK_M, F
+    COMPLIANT_PRESS_N never past COMPLIANT_PRESS_MAX_N and K the pads'
+    stiffness straight down held where they stand, (C^-1)_zz of
+    fingertip_compliance at q: held at q, the springs push F'
+    straight down at the pads, whatever the compliance couples, and held
+    up to PUSH_BACK_M higher, F at the most. The first step is worked
     out from the joints as the stroke's execution returned, and goes out
     at once: no wait at the cut, whose reference stands over the cap.
     After each step the arm is waited still (runner.wait_still: it spins
     and hears fresh joints) and the pads are read from joints heard after
     that wait: down more than PUSH_GIVE_M during the step, the button gave
-    and the force fell, and the next step sets the reference again from
-    there. One rule for how it ends: either with the springs set to push
-    F straight down on pads that stand where it was set for (held: a
-    step the button held), or with the springs let go (refused: a step
+    and the force fell; up more than PUSH_BACK_M, what is under the pads
+    came back up as the step took force off and the force rose; either
+    way the next step sets the reference again from there. One rule for
+    how it ends: either with the springs set to push straight down on
+    pads that stand where it was set for (held: a step after which the
+    pads stand within both, the force within F - K (PUSH_GIVE_M +
+    PUSH_BACK_M) and F, never over), or with the springs let go (refused: a step
     the rule refuses; not started: one the runner or the driver refuses
     before it starts; slid: the pads more than PUSH_SLIDE_M sideways from
-    where it began, a WARNING; steps: PUSH_STEPS flown and the button gave
-    under the last too; through: the pads more than cfg.button_travel_m +
-    PUSH_THROUGH_M below where it began; all five
+    where it began, a WARNING; steps: PUSH_STEPS flown and the button gave,
+    or came back up, under the last too; through: the pads more than
+    cfg.button_travel_m + PUSH_THROUGH_M below where it began; all five
     rp.let_go, the reference the arm as it stands — the stroke's cut
     reference, straight below the pads, unbent and over the cap, is never
     kept — and stopped: a step that stopped part-way,
@@ -1588,7 +1610,13 @@ def push_down(ctx, cfg, runner, stroke, held_ref):
     first = _pads(chain, q)
     steps, end, why, let_go, stopped = 0, None, None, False, ""
     while end is None:
-        target, _aside, refused = spring_end(chain, q, force, COMPLIANT_KQ)
+        # set PUSH_BACK_M short of F, F less K x PUSH_BACK_M: pads that then stand up to PUSH_BACK_M above
+        # where it was set for, held, are pushed F at the most, never more. K is the pads' stiffness held
+        # where the button holds them (x and y too: (C^-1)_zz, ~2800 N/m at the tests' pose), not free
+        # (1 / C_zz, ~1750, the F / drop of F's reference): pads that rise on the button load the springs
+        # by the held K, and the larger K leaves the larger margin
+        k_held = float(np.linalg.pinv(fingertip_compliance(chain, q, COMPLIANT_KQ))[2, 2])
+        target, _aside, refused = spring_end(chain, q, force - k_held * PUSH_BACK_M, COMPLIANT_KQ)
         if refused is not None:
             end, why = "refused", "%s; the springs let go" % refused
             break
@@ -1628,10 +1656,11 @@ def push_down(ctx, cfg, runner, stroke, held_ref):
                 1000 * (first[2] - pad[2]),
                 1000 * float(cfg.button_travel_m),
             )
-        elif before[2] - pad[2] <= PUSH_GIVE_M:
+        elif -PUSH_BACK_M <= before[2] - pad[2] <= PUSH_GIVE_M:
             end, why = "held", "the button held"
         elif steps >= PUSH_STEPS:
-            end, why = "steps", "the button still gave after %d steps; the springs let go" % steps
+            went = "gave" if pad[2] < before[2] else "came back up"
+            end, why = "steps", "the button still %s after %d steps; the springs let go" % (went, steps)
     if end not in ("held", "stopped"):
         # the springs let go: the reference held (the cut's, straight below the pads, unbent and over the
         # cap; or one set for where the pads stood before they slid or went on down, which pushes partly
@@ -1652,16 +1681,17 @@ def push_down(ctx, cfg, runner, stroke, held_ref):
         let_go,
         stopped,
     )
+    # how far the pads stand from where they met the button, which way: pads that came back up are higher
+    went = "%.1f mm %s" % (abs(1000 * push.down_m), "higher" if round(1000 * push.down_m, 1) < 0 else "lower")
     if not steps and end == "stopped":
         log.info(
-            "[press_demo] PUSH: step 1 stopped part-way from where the pads met the button, the pads %.1f mm "
-            "lower and %.1f mm aside: %s" % (1000 * push.down_m, 1000 * push.aside_m, why)
+            "[press_demo] PUSH: step 1 stopped part-way from where the pads met the button, the pads %s and "
+            "%.1f mm aside: %s" % (went, 1000 * push.aside_m, why)
         )
     elif steps:
         log.info(
             "[press_demo] PUSH: %d step%s straight down to ~%.0f N from where the pads met the button, the pads "
-            "%.1f mm lower and %.1f mm aside: %s"
-            % (steps, "" if steps == 1 else "s", force, 1000 * push.down_m, 1000 * push.aside_m, why)
+            "%s and %.1f mm aside: %s" % (steps, "" if steps == 1 else "s", force, went, 1000 * push.aside_m, why)
         )
     else:
         log.info("[press_demo] PUSH: none from where the pads met the button: %s" % why)
@@ -1674,8 +1704,9 @@ def compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=None):
     push_hold_s where the springs left the pads, pressing — the hold IS the
     reading. With PRESS_BY_FORCE, a stroke `contact` cut where the pads met
     the box (watch_press) is pushed first (push_down): the reference set,
-    from the arm as it stands, to where the springs push COMPLIANT_PRESS_N
-    straight down on the pads, again where the button gave; the hold reads
+    from the arm as it stands, to where the springs push straight down on
+    the pads, never more than COMPLIANT_PRESS_N, again where the button
+    gave or what is under the pads came back up; the hold reads
     against the reference the push left. Off (as before), or a stroke not
     cut: against the stroke's end (stroke.q_end), or the reference a cut
     left the driver holding (`contact`'s held_ref). What the pads pushed
@@ -1895,8 +1926,8 @@ def press_compliant(ctx, cfg, runner, contact_tool, seen, turned=None, top_z=Non
     stopped (compliant_rise), anything raised — and before it, a turn
     stopped part-way (turn_down's). With PRESS_BY_FORCE (not flown) the
     stroke stops where the pads meet the button and the hold pushes from
-    there (compliant_hold, push_down): the springs push COMPLIANT_PRESS_N
-    straight down on the pads where they stand, not toward the stroke's
+    there (compliant_hold, push_down): the springs push straight down on
+    the pads where they stand, never more than COMPLIANT_PRESS_N, not toward the stroke's
     end, and a push step that stopped part-way holds the arm there, let
     go, as a stroke that did; off, as before. A turn or a stroke that did not start
     moved nothing, and nothing is let go: after the stroke's, the arm

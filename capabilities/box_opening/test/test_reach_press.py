@@ -1125,6 +1125,45 @@ def test_a_home_refused_for_a_joint_on_its_limit_steps_off_it_first(ctx, tmp_pat
     assert len(ctx.client.executed) == 2 and ctx.client.live == pytest.approx(rest)
 
 
+@pytest.mark.parametrize("backed_off", [False, True], ids=["refused at once", "refused after the back-off"])
+def test_a_home_the_planner_refuses_is_the_runs_last_stop_and_says_the_arm_holds(
+    ctx, monkeypatch, tmp_path, capsys, backed_off
+):
+    """Final gate F4: a STOP whose own class is recoverable (here the press moved the box: box_moved) sends
+    the arm home, and the planner refuses home, at once or after the back-off: the arm stands out where
+    the STOP left it. The refusal is a STOP of its own, the run's last word, so the node reports the arm
+    holding (arm_holds, not recoverable), never the earlier stop's class, and the flight view does not say
+    the arm is home."""
+    from conftest import runner as make_runner
+
+    from box_opening import node
+    from box_opening.flight_view import FlightView
+
+    ctx.press_cfg = cfg = load_press_demo(PINK)
+    refusal = "MotionGenStatus.INVALID_START_STATE_JOINT_LIMITS" if backed_off else "MotionGenStatus.IK_FAIL"
+
+    def refused(ctx_, cfg_):
+        raise RuntimeError("planning failed for home: %s" % refusal)
+
+    monkeypatch.setattr(reach_press, "_home_legs", refused)
+    monkeypatch.setattr(reach_press, "_back_off", lambda *a, **k: True)
+    stop = "STOP: the press MOVED the box 20 mm from where it was seen"
+    assert reach_press._go_home(ctx, cfg, make_runner(ctx.client, tmp_path), stop) is False
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-1].startswith("[press_demo] STOP: home plan refused (") and "the arm holds" in lines[-1]
+    sent_home = [ln for ln in lines if ln.endswith("— returning home")]
+    assert node.error_for("open_box", 1, sent_home).error_code == "box_moved"  # that stop alone: recoverable
+    error = node.error_for("open_box", 1, lines)
+    assert error.error_code == "arm_holds" and not error.recoverable
+    out = []
+    view = FlightView(write=out.append, clock=lambda: 0.0)
+    view.start()
+    for line in lines:
+        view.feed(line)
+    view.finish(1)
+    assert out[-1].rstrip().endswith("arm: holding where it stopped") and not any("arm: home" in ln for ln in out)
+
+
 @pytest.mark.parametrize("off, flown", [(0.0, True), (0.039, True), (0.041, False)])
 def test_a_home_planned_ahead_flies_as_planned_only_from_where_it_starts(ctx, tmp_path, capsys, off, flown):
     """_go_home handed home's legs planned before the arm stood here (the

@@ -1747,6 +1747,115 @@ def test_what_flies_from_the_lift_s_top_that_may_have_moved_without_starting_hol
     assert "STOP: the lid's way to the table from the lift's top did not start" in capsys.readouterr().out
 
 
+def test_a_lift_that_may_have_moved_without_starting_holds_the_lid_and_never_opens_the_fingers(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The lift (the 6th goal) ends with no progress from a goal the driver may have taken (no result): the
+    arm may be lifting the lid by its knob. The fingers are not opened on it and no way back is sent from
+    joints read then: the run stops, the arm holding the lid, the record saying the lid is in the fingers
+    (the knob was held at the close), the springs not let go where nothing said it moved — the node's
+    arm_holds."""
+    from box_opening import node
+
+    ends = {6: ("failed", {"message": "no result", "progress": 0.0})}
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], ends=ends)
+    assert code == 1 and len(ctx.client.executed) == 6 and ctx.client.lets_go == []
+    after = rec.events[rec.events.index("lid:lift") + 1 :]
+    assert after == []  # no grip:open, no way back, no home
+    assert [r["ok"] for r in rows if r["leg"] == "reach_grip_result"] == [True]
+    out = capsys.readouterr().out
+    assert "STOP: the lift did not start during lid:lift (no result) — the arm holds the lid" in out
+    assert "the lid is let go where it lies" not in out
+    assert node.error_for("open_box", code, out.splitlines()).error_code == "arm_holds"
+    _the_lift_failed_in_the_flight_view(out, code)
+
+
+def test_the_lid_s_way_off_the_box_that_may_have_moved_without_starting_holds_the_lid_with_the_slip_check_off(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """Final gate F3 and R4, the slip check off (SLIP_CHECK): the close, the lift, the clear and the carry
+    fly as one execution (the 6th goal), and it ends with no progress from a goal the driver may have taken
+    (no result). The run stops as with the check on, in the one-motion shape's own words, the arm holding
+    the lid, nothing let go; and the flight view, fed those words, shows the lift failed."""
+    from box_opening import node
+
+    monkeypatch.setattr(rlo, "SLIP_CHECK", False)
+    ends = {6: ("failed", {"message": "no result", "progress": 0.0})}
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], ends=ends)
+    assert code == 1 and len(ctx.client.executed) == 6 and ctx.client.lets_go == []
+    assert rec.events[rec.events.index("lid:lift") + 1 :] == ["lid:clear", *CARRY]  # all sent, nothing after
+    out = capsys.readouterr().out
+    assert "STOP: the lid's way from the box to the table did not start during " in out
+    assert "the lid is let go where it lies" not in out
+    assert node.error_for("open_box", code, out.splitlines()).error_code == "arm_holds"
+    _the_lift_failed_in_the_flight_view(out, code)
+
+
+def _the_lift_failed_in_the_flight_view(out, code):
+    """Final gate R4: the flight view, fed the run's console lines, shows the LIFT step failed, the arm
+    holding where it stopped, and never says the lift ok."""
+    view = _flight_view(out, code)
+    assert any(" LIFT      FAIL " in line for line in view)
+    assert not any(" LIFT      ok " in line or line.rstrip().endswith(" LIFT      ok") for line in view)
+    assert view[-1].rstrip().endswith("arm: holding where it stopped")
+
+
+@pytest.mark.parametrize("one_motion", [True, False], ids=["the spot chosen ahead", "the spot chosen after the lift"])
+def test_a_lift_whose_first_execution_arrived_and_whose_last_the_driver_rejected_holds_the_lid(
+    ctx, monkeypatch, tmp_path, capsys, one_motion
+):
+    """Final gate R1: the slip check off (SLIP_CHECK), the close, the lift and the clear fly together, and
+    the clear here under springs of its own (gains), so the lift and the clear go out as two executions
+    (legs.can_merge): the 6th goal, the lift, arrives — the lid is 40 mm over the box — and the 7th, the
+    clear, is rejected by the driver. That rejection moved nothing, but the lift before it did: the fingers
+    are never opened on the lid in the air and no back-out is sent. The run stops, the arm holding the
+    lid, the springs let go where it stands (the lift said it moved) — the node's arm_holds; and the flight
+    view shows the lift failed."""
+    from box_opening import node
+
+    monkeypatch.setattr(rlo, "SLIP_CHECK", False)
+    real = rlo.plan_lift
+
+    def own_springs(ctx_, cfg_, q, quat):
+        lift, why = real(ctx_, cfg_, q, quat)
+        if lift is not None:
+            lift.legs[1].gains = 3  # a driver profile of its own: never merged with the lift
+        return lift, why
+
+    monkeypatch.setattr(rlo, "plan_lift", own_springs)
+    ends = {7: trp.REJECTED}
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], ends=ends, one_motion=one_motion
+    )
+    assert code == 1 and len(ctx.client.executed) == 7
+    lifted = [names for names, _gains in rec.runs if "lid:lift" in names]
+    assert lifted and lifted[-1][-1] != "lid:lift"  # the clear (and the carry, ahead) in the same run
+    after = rec.events[rec.events.index("lid:lift") + 1 :]
+    assert "grip:open" not in after and not any(name in after for name in BACK_OUT) and "home" not in after
+    assert ctx.client.lets_go == [7]
+    assert [r["ok"] for r in rows if r["leg"] == "reach_grip_result"] == [True]
+    out = capsys.readouterr().out
+    # (the spot chosen ahead too: a lift that flies as two executions cannot carry the set-down's watch,
+    # and the lift goes alone, the spot chosen after it — the one-motion shape's own words are the next
+    # test's)
+    assert "would not fly as one execution" in out or not one_motion
+    assert "STOP: the lift stopped during lid:clear (goal rejected by the driver" in out
+    assert "the lid is let go where it lies" not in out
+    assert node.error_for("open_box", code, out.splitlines()).error_code == "arm_holds"
+    _the_lift_failed_in_the_flight_view(out, code)
+
+
+def test_a_lift_the_driver_rejected_lets_the_lid_go_on_the_box_and_backs_out(ctx, monkeypatch, tmp_path, capsys):
+    """The lift (the 6th goal) rejected by the driver (client.NOT_TAKEN): nothing went to the arm, the knob
+    is in the fingers and the lid on the box. The fingers open on it and the hand backs out, as before."""
+    code, rec, _chain, _rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], ends={6: trp.REJECTED}
+    )
+    after = rec.events[rec.events.index("lid:lift") + 1 :]
+    assert after[: 1 + len(BACK_OUT)] == ["grip:open", *BACK_OUT]
+    assert "the lift did not start (goal rejected by the driver" in capsys.readouterr().out
+
+
 def test_a_ctrl_c_as_the_fingers_are_read_at_the_lift_s_top_flies_nothing_more(ctx, monkeypatch, tmp_path):
     """A cancel at the new stop, the lid in the fingers over the box: nothing flies after it, and the run's
     own handler lets the arm go, as at any other point with the lid held."""

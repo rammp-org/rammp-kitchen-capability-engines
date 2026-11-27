@@ -66,18 +66,28 @@ beside the container, and goes home. It has one action, `open_box`:
    straight down at it, and the pads are moved over the button it sees there
    before they come down (see "The sight before the press"). The arm
    feels where the pads meet the lid, watching its whole way down, and the
-   stroke stops there. From where the arm then stands it pushes 10 N straight
-   down on the pads (the joint springs' reference set for that force, not a
-   depth), and pushes again where the button gives, up to eight short pushes:
-   no height from a camera, no button travel and no stiffness model sets the
+   stroke stops there. From where the arm then stands it pushes straight
+   down on the pads, about 9.4 N (the joint springs' reference set for a
+   force, not a depth: 10 N less what 0.2 mm takes off it), and pushes again
+   where the button gives, or where what is under the pads comes back up as
+   a push eases the force the stroke's stop left (more than 0.2 mm up, the
+   springs would push more than 10 N), up to eight short pushes: held, the
+   force is about 8.0 to 10.0 N, never over 10 N. No
+   height from a camera, no button travel and no stiffness model sets the
    force. A push that stops part-way ends the run there, the arm let go and
    holding, as a stroke that stops part-way does. Any other push that does
    not end with the button held (the arm cannot fly or start it, the pads
-   slide more than 4 mm sideways, the button still gives after eight pushes
-   or goes past its travel) lets the springs go, and the press counts as not
-   felt. Not flown: the press as
+   slide more than 4 mm sideways, the button still gives, or still comes
+   back up, after eight pushes, or goes past its travel) lets the springs
+   go, and the press counts as not felt: the grip then has no height from
+   the press and goes by the cameras' top, its watched way down meeting the
+   lid where it is (with `reach_lid_off.GRIP_TOUCH` off there is no such
+   net: the grip's way down is planned to the cameras' top, which has stood
+   40-45 mm under where the pads met the button). Not flown: the press as
    flown to 2026-11-20, the stroke ending the button's travel past the
-   contact, is one switch away (`depth_press.PRESS_BY_FORCE`). A press that
+   contact, is one switch away (`depth_press.PRESS_BY_FORCE`; not
+   `press_contact.PRESS_FROM_CONTACT`, which also turns off the grip's and
+   the set-down's touch cuts). A press that
    meets something
    more than 45 mm above the button's top as the cameras saw it, or nothing
    down to 25 mm below it, is refused: stopped there, back up and home
@@ -154,9 +164,13 @@ beside the container, and goes home. It has one action, `open_box`:
    ending `lid_dropped` ("the lid slipped out of the fingers on the lift").
    The console, the flight view and the `reach_grip_result` row (`slipped`)
    say the lid slipped out on the lift, never that the fingers closed on
-   nothing. The grip is recorded held (`reach_grip_result`, `LID GRIPPED`)
-   once the lift's top reads the lid in the fingers, or where the lift stops
-   part way (the knob was held at the close). Should the move on from the
+   nothing. The grip's close-up row (`grip_close_look`) is the close's,
+   written at the close: it says held of a grip whose lid then slipped out
+   on the lift, where that attempt's `reach_grip_result` carries `slipped`
+   (join them on `attempt`). The grip is recorded held
+   (`reach_grip_result`, `LID GRIPPED`) once the lift's top reads the lid
+   in the fingers, or where the lift stops part way (the knob was held at
+   the close). Should the move on from the
    lift's top not start (refused, or turned down by the driver before it
    went out), the lid goes back on the container the way it came off, and
    the run ends `lid_put_back`, recoverable. That includes a refusal by the
@@ -165,7 +179,12 @@ beside the container, and goes home. It has one action, `open_box`:
    20 mrad at any joint), so an arm that far off its top has something
    holding the lid or the arm, and it is not planned again from there. One
    that stopped part way, or may have moved without starting, stops the run
-   with the arm holding the lid (`arm_holds`). It does not see a lid that
+   with the arm holding the lid (`arm_holds`). The lift itself as well: one
+   the driver rejected, or that never went out, lets the lid go on the
+   container and the hand backs out, as from a lift that has no way off the
+   box; one that may have moved without saying it started stops the run
+   with the arm holding the lid (`arm_holds`), the grip recorded held and
+   the springs not let go. It does not see a lid that
    slips later, on the way to its spot (that is still found at the table,
    below), nor one caught on the container that does not come free (the
    fingers stay in the band); a lid dropped part way up may sit tilted on
@@ -590,7 +609,7 @@ still in the fingers, no code is recoverable.
 | `bad_config`          | no          | A setting has a value it cannot have (`air_control` neither `impedance` nor `position`). Nothing ran                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `line_up_unavailable` | no          | What watches the container or judges its place could not start, or ended while lining up (the message carries what it said). The run was never told to go; a wrist that looked is back at rest. What judges the place (`reach_probe`) is started at the watch's first word; in a line-up that began because no camera saw the container, only at the first sighting, so such a line-up cannot end this way for a container that never comes into view                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `not_lined_up`        | yes         | The container was not where the arm opens it, or was never seen by a camera, in the time a line-up has (see "How long a line-up may take"), the UI went, a line-up in the middle of a run had no time left under the orchestrator's 120 s, or the run asked to be guided a fourth time in one goal (see "Lining up in the middle of a run"). Nothing was pressed; a wrist that looked is back at rest. The message says which it was (`no camera saw the container within ...` where none did), and carries the last instruction the user was given and, in the middle of a run, why the chair was guided; the next `open_box` then lines up first, unless no camera had seen the container during the line-up (it does all the same where the 120 s cut short, or left no time for, the guidance of a run whose own look had found no container), and not after a fourth request |
-| `timeout`             | yes         | The run was still going after 90 s and was stopped its own way (one Ctrl+C); its stop's worst (a second Ctrl+C, then a kill) still ends before the 120 s of an orchestrator that counts them from the goal cancel; not recoverable with the lid still in the fingers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `timeout`             | sometimes   | The run was still going after 90 s and was stopped its own way (one Ctrl+C); its stop's worst (a second Ctrl+C, then a kill) still ends before the 120 s of an orchestrator that counts them from the goal cancel. Recoverable only where the run had moved nothing, or the last motion that moved the arm was a way home that got there, and the Ctrl+C cut no motion part way (`node.timeout_recoverable`); else not, and the arm's status is set to error. Never with the lid still in the fingers                                                                                                                                                                                                                                                                                                                                                                             |
 | `not_ready`           | yes         | Refused before anything moved: the planner or the arm driver not up, the driver's link to the arm faulted or e-stopped, another program driving the arm, no TF to the wrist camera's mount, no scene camera calibration. No camera's stream is part of it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `not_found`           | yes         | A find, or a line-up's watch, with no container for a reason no moving of the chair cures: what it looks with delivers nothing, what it sees cannot be tied to the selected container, or (a find only) it sees two things that could be the container (see "A container no camera sees" for each, and for what the panel says). Nothing was pressed, the arm home (after a line-up: at rest, the wrist turned back). A container that is simply in no camera's view is not this: the chair is guided, and nothing but the line-up's own time ends that. A run by hand (`press_demo` without `--guide`) ends `not_found` for all of them, as it always has                                                                                                                                                                                                                        |
 | `not_home`            | yes         | The arm could not get to its start pose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |

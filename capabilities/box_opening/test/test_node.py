@@ -616,6 +616,76 @@ def test_how_a_run_ended_is_its_error_code(engine, monkeypatch, say, code, error
     assert e.value.error_code == error and e.value.recoverable
 
 
+NO_BUTTON_SENT_HOME = (
+    "[press_demo] STOP: no button from the look pose (0 of 3 aims) — nothing was pressed — returning home"
+)
+
+
+@pytest.mark.parametrize(
+    "last",
+    [
+        "[press_demo] STOP: home plan refused (planning failed for home: MotionGenStatus.IK_FAIL) — the arm holds; "
+        "home it with sheppy's home_arm",
+        "[press_demo] STOP: home plan refused (no plan-free step toward the rest pose lets the planner plan home) — "
+        "the arm holds; home it with sheppy's home_arm",
+        "STOP: leg home -> failed (PATH_TOLERANCE_VIOLATED) — arm holds",
+    ],
+    ids=["a refusal that says FAIL", "a refusal that does not", "a home leg that failed"],
+)
+def test_no_button_then_a_home_that_did_not_get_there_is_the_arm_holding_not_a_run_to_ask_again(last):
+    """Final gate R2: exit 2 is no container found or no button from the look pose, both from an arm sent
+    home. Where home did not get there (its plan refused, with or without "FAIL" in the refusal, or a
+    home leg failed, the runner's own "— arm holds"), the run's last word says the arm holds where it
+    stopped: arm_holds, not recoverable — by the same words STOP_CODES reads for any other exit
+    (node.ARM_HOLDS_SAID), never no_button."""
+    from box_opening import node
+
+    error = node.error_for("open_box", 2, [NO_BUTTON_SENT_HOME, last])
+    assert error.error_code == "arm_holds" and not error.recoverable
+    assert last in str(error) and node.ARM_HOLDS in str(error)  # the last word, and what to do about it
+    assert any(pattern is node.ARM_HOLDS_SAID and code == "arm_holds" for pattern, code, _r in node.STOP_CODES)
+
+
+@pytest.mark.parametrize(
+    "say, error",
+    [
+        ([NO_BUTTON_SENT_HOME], "no_button"),
+        (["[press_demo] NO BOX — scene camera: no candidate — returning home"], "not_found"),
+        (["a run that said nothing of how it ended"], "not_found"),
+        (
+            [
+                "[press_demo] NO BOX — scene camera: no candidate; wrist survey: no survey pose the arm holds clear "
+                "of the chair, its user and where a counter may stand (4 tried) — returning home"
+            ],
+            "not_found",
+        ),
+        (
+            [
+                "[press_demo] STOP: no button from the look pose (the scene camera cannot say it holds only one "
+                "container of the kind) — nothing was pressed — returning home"
+            ],
+            "no_button",
+        ),
+    ],
+    ids=[
+        "no button, the arm home",
+        "NO BOX",
+        "nothing said",
+        "NO BOX, its reason says holds of a survey pose",
+        "no button, its reason says holds of a camera",
+    ],
+)
+def test_exit_2_s_own_ends_are_read_as_before_where_the_arm_got_home(say, error):
+    """Final gate R2: where nothing after it says the arm holds, exit 2's two ends are as they were:
+    no_button and not_found, recoverable. The line that sent the arm home is never itself read as the arm
+    holding, whatever its reason says "holds" of (round 2: the wrist survey's "no survey pose the arm holds
+    clear of the chair" is a NO BOX from an arm that got home): only a later word is."""
+    from box_opening import node
+
+    got = node.error_for("open_box", 2, say)
+    assert got.error_code == error and got.recoverable
+
+
 @pytest.mark.parametrize(
     ("say", "code", "error"),
     [

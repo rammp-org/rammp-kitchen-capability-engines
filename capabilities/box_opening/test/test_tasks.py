@@ -634,9 +634,14 @@ def test_a_stop_above_the_box_still_gets_home(ctx, tmp_path, capsys):
 
 def test_a_stop_with_no_box_located_holds_honestly(ctx, tmp_path, capsys):
     """... and when there is no located box to rise over, a refused home
-    still leaves the arm holding with an honest line, as before."""
+    still leaves the arm holding with an honest line, as before. The line
+    is a STOP of its own (final gate R2): after "NO BOX ... — returning
+    home" it is the run's last word, and the node reads the arm holding,
+    not a container to look for again, whether or not the refusal says
+    "FAIL"."""
     from conftest import runner as make_runner
 
+    from box_opening import node
     from box_opening.tasks import press_demo
 
     c = ctx
@@ -648,8 +653,12 @@ def test_a_stop_with_no_box_located_holds_honestly(ctx, tmp_path, capsys):
         trajectory = None
 
     c.client.plans = [Refused()]
-    assert press_demo.try_home(c, make_runner(c.client, tmp_path), True, "STOP: test") is False
-    assert "arm holds" in capsys.readouterr().out and c.client.executed == []
+    assert press_demo.try_home(c, make_runner(c.client, tmp_path), True, "NO BOX — test") is False
+    said = [ln for ln in capsys.readouterr().out.splitlines() if "[press_demo]" in ln]
+    assert "arm holds" in said[-1] and "FAIL" not in said[-1] and c.client.executed == []
+    assert "NO BOX — test — returning home" in said[0]
+    error = node.error_for("open_box", 2, said)
+    assert error.error_code == "arm_holds" and not error.recoverable and "home plan refused" in str(error)
 
 
 def test_a_home_that_was_refused_or_did_not_arrive_says_so(ctx, tmp_path):

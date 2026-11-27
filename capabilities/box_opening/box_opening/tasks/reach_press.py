@@ -2566,7 +2566,9 @@ def _go_home(ctx, cfg, runner, why, ref=None, lets_go=True, ahead=None):
     2026-10-22), or INVALID_START_STATE_JOINT_LIMITS, which the same test
     takes — backs straight off toward the arm first (guarded against `ref`
     when given), the refusal printed. Every refusal is in the run log.
-    False — the arm holds — when the plan is refused or a move fails. A
+    False — the arm holds — when the plan is refused (a STOP of its own:
+    the run's last word, not the STOP that sent it home, whose class may
+    be recoverable) or a move fails. A
     compliant run's back-off or home that stopped part-way lets go there
     (let_go_part_way), unless `lets_go` is False: _home_from_over_box's
     callers let go of a home that did not get there themselves. `ahead`:
@@ -2581,13 +2583,17 @@ def _go_home(ctx, cfg, runner, why, ref=None, lets_go=True, ahead=None):
     except RuntimeError as e:
         runner.note("home_refused", why=str(e)[:300])
         if "INVALID_START" not in str(e) or not _back_off(ctx, runner, ref, why=str(e), lets_go=lets_go):
-            log.info("[press_demo] home plan refused (%s) — the arm holds; home it with sheppy's home_arm" % _short(e))
+            log.info(
+                "[press_demo] STOP: home plan refused (%s) — the arm holds; home it with sheppy's home_arm" % _short(e)
+            )
             return False
         try:
             legs = _home_legs(ctx, cfg)
         except RuntimeError as e2:
             runner.note("home_refused", why=str(e2)[:300], after="reach:back-off")
-            log.info("[press_demo] home plan refused (%s) — the arm holds; home it with sheppy's home_arm" % _short(e2))
+            log.info(
+                "[press_demo] STOP: home plan refused (%s) — the arm holds; home it with sheppy's home_arm" % _short(e2)
+            )
             return False
     res = runner.run(legs, execute=True)
     if lets_go:

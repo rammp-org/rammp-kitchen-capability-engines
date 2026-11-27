@@ -1072,6 +1072,9 @@ class Tracker:
 
 
 NO_BUTTON = re.compile(r"no button")  # the look found the container and no button on it (error_for)
+# a last word that says the arm holds where it stopped ("— the arm holds", "it holds", "The arm holds over
+# where it was", "did not get home"): a person clears it. STOP_CODES' arm_holds row, and exit 2's too
+ARM_HOLDS_SAID = re.compile(r"\bholds\b|did not get home")
 # The run's last STOP line -> (error code, recoverable), first match wins (REVIEW_RULES U4).
 # Recoverable only where the run says nothing moved, or that the arm got home with nothing
 # held: a retry may then succeed. A STOP no rule names, and an exit with none (a traceback),
@@ -1079,8 +1082,7 @@ NO_BUTTON = re.compile(r"no button")  # the look found the container and no butt
 STOP_CODES = (
     (re.compile(r"not starting"), "not_ready", True),
     (re.compile(r"NO BOX"), "not_found", True),
-    # "— the arm holds", "it holds", "The arm holds over where it was": a person clears it
-    (re.compile(r"\bholds\b|did not get home"), "arm_holds", False),
+    (ARM_HOLDS_SAID, "arm_holds", False),
     # the press's contact off the band around the cameras' top, none, or its watch failed
     # (tasks/press_contact): stopped there, back up and home
     (re.compile(r"something else is in the way"), "contact_early", True),
@@ -1152,6 +1154,13 @@ def error_for(action_id, code, lines):
         # one that was found (reach_press: "STOP: no button from the look pose"). The last word says which.
         # Until 2026-11-19 every exit 2 was not_found before the words were read, and no_button could not
         # be reached by a real run at all (the test fed its line with exit 1)
+        sent_home = "NO BOX" in why or NO_BUTTON.search(why)  # the line of either end: it sent the arm home
+        if said and not sent_home and ARM_HOLDS_SAID.search(why):
+            # a later word than the one that sent the arm home, and it says the arm did not get there (the
+            # home plan refused, a home leg failed): it stands out where the run left it, never a run to
+            # simply ask for again. Only a later word: the sending line's own reason may say "holds" of
+            # something else ("no survey pose the arm holds clear of the chair"), from an arm that got home
+            return EngineError("arm_holds", f"{why} -- {ARM_HOLDS}", recoverable=False)
         if "NO BOX" not in why and NO_BUTTON.search(why):
             return EngineError("no_button", why, recoverable=True)
         return EngineError("not_found", why, recoverable=True)

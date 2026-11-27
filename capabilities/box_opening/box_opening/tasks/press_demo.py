@@ -1370,7 +1370,9 @@ def try_home(ctx, runner, execute, why):
                     "home (last: %s) — jog the arm clear by hand" % (CLEAR_MARGIN_MAX_STEP_RAD, last)
                 )
     except RuntimeError as e:
-        log.info("[press_demo] home plan refused (%s) — arm holds" % e)
+        # a STOP of its own, as reach_press._go_home's: the run's last word is that the arm holds, not the
+        # line that sent it home ("NO BOX ...", read `not_found`, a run to ask for again)
+        log.info("[press_demo] STOP: home plan refused (%s) — arm holds" % e)
         return False
     res = runner.run(legs, execute=execute)
     return all(r.ok for r in res)
