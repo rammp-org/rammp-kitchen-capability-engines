@@ -76,11 +76,15 @@ after the press as before (reach_press._fly_way_in).
           made where the arm stands: SpotSearch). Still none: the lid goes
           back on the box (put_lid_back), said.
   LIFT    the close, then the lid straight up off the canister
-          (lift_off_m), up and back toward the arm clear of the box's padded
+          (lift_off_m), ONE execution; at its top, the lid still over the
+          box, the fingers read (SLIP_CHECK, _lift_top): out of the grip
+          band, the lid slipped out of them, and that is a grip that held
+          nothing, as a close on air (back out, aim, grip again; or home).
+          In them: up and back toward the arm clear of the box's padded
           volume (as the way home's clear), the carry to the spot and down
           onto the table: ONE execution. Where no spot's carry and home
-          planned ahead, as before: the lift and the clear alone, the carry
-          to the scene camera's best spot planned while they fly
+          planned ahead, as before: the lift, then the clear alone, the carry
+          to the scene camera's best spot planned while the clear flies
           (carry_ahead), and there the lid's one stop, the spot look: the
           wrist camera's frame — the held lid, the hand and the box taken
           out of it — pooled with the scene camera's map (choose_and_carry);
@@ -114,7 +118,8 @@ the way back, the grip's way up, the clear, the retreat — fly at
 reach_press.free_line_speed; the legs that meet the box, the knob or the
 table at their own. It decides only what it must:
 the knob up or not, the box where it was, the fingers on the knob or on
-air, where the lid goes, the lid still in them at the table. Three moves
+air, the lid still in them at the lift's top, where the lid goes, the lid
+still in them at the table. Three moves
 are ended by the arm's own feel (press_contact.PressContact: the pads
 lagging their reference): the press (depth_press.watch_press), every grip's
 last stretch down to the knob, and the set-down. The grip's (grip_down,
@@ -393,6 +398,38 @@ LIFT_OFF_MIN_CLEAR_M = 0.010
 # lower: a lean is flown only where that edge still ends over the rim
 # (_lean_keeps_clear), 4 mm of the 15 at 5 deg for the pink canister's lid.
 LIFT_LEAN_DEG = (5.0, 10.0)
+# The lift flies on its own and the fingers are read at its top, where the lid
+# still hangs over the box and the hand over the knob (_lift_top): a lid still
+# in them goes on, the clear and all after it as before, from there; one that
+# is not is a grip that held nothing (the miss a close on air is). Flatbot
+# 2026-10-30 13:28:45: "the knob slipped as the lift began", one of the day's 8
+# missions, and nothing read the fingers again until the table (0.79 there):
+# an empty hand was carried, lowered and opened, and the run ended STOP. Not
+# flown. Off: the close, the lift and all after it fly as one execution, as
+# before.
+SLIP_CHECK = True
+# ... read once the knuckle has stopped changing: within GripperWait.SETTLE_TOL
+# of the first of LIFT_TOP_STILL_READS fresh readings in a row (/joint_states'
+# 49 Hz: ~0.16 s, the close's own SETTLE_S 0.15), each a message that came
+# after the one before it (client.knuckle_after; the knuckle is in every one,
+# the arm still or not, so nothing waits for the arm); fingers that lost the
+# knob run on toward shut (the close sent 1.0, full shut, and it is not sent
+# again). At most LIFT_TOP_READ_S from the first, past the slowest of 102
+# logged gripper legs (0.716 s; a run on from the knob, ~0.4, to shut is about
+# half a stroke): then a knuckle that moved toward shut over the read, the
+# mean of its later half more than SETTLE_TOL past the mean of its earlier
+# half, has not got the knob, whatever its last value. Over the whole read,
+# not its end: a steady slide too fast to settle (3 mrad in 7 periods, ~21
+# mrad/s) shows as 10 mrad or more, and a count's flicker averages out; one
+# that only flickers is judged by the band on its last. Fewer than
+# LIFT_TOP_STILL_READS readings (the stream fell silent part way) tell no
+# move, a count between two of them being noise: the band on the last of
+# them. No reading at all within LIFT_TOP_READ_S: the fingers cannot be read.
+LIFT_TOP_STILL_READS = 8
+LIFT_TOP_READ_S = 1.0
+# what a slip at the lift's top says first: its detail, the record's and the console's (the node classes the
+# run's last word by "slipped out of the fingers": lid_dropped)
+SLIPPED_ON_LIFT = "the lid slipped out of the fingers on the lift"
 # The set-down: at setdown_speed or faster (PLACE_TOUCH_SPEED below) to
 # SETDOWN_SLOW_M above where the plan has the lid meet the table — the
 # table the set-down goes by (setdown_table_z), the model's lid hanging from
@@ -2676,7 +2713,8 @@ def _grip_backwards(ctx, way, world, q=None):
 class LiftOff:
     """From the knob held to the spot look (plan_lift): 'lid:lift'
     straight up and 'lid:clear' up and back toward the arm, `back_m`
-    back — one execution after the close."""
+    back — one execution after the close, or (SLIP_CHECK) the lift with the
+    close and the clear from its top."""
 
     legs: list
     back_m: float = 0.0
@@ -3988,16 +4026,27 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         code = _way_back(ctx, cfg, runner, way, ctx.client.joints(), dp.DepthPress(free=True))
         return _MISSED if code is None else code
 
-    def miss(detail, air, empty=False):
-        runner.note("reach_grip_result", ok=False, detail=detail, attempt=0, on_air=air, retry=True, from_press=True)
+    def miss(detail, air, empty=False, lifted=False):
+        runner.note(
+            "reach_grip_result",
+            ok=False,
+            detail=detail,
+            attempt=0,
+            on_air=air,
+            retry=True,
+            from_press=True,
+            **({"slipped": True} if lifted else {}),
+        )
         log.info("[press_demo] the grip straight from the press did not hold the knob (%s)" % detail)
         _video(ctx, "the grip straight from the press missed (%s): back to the look pose" % detail)
         # shut on nothing, they back out shut; stopped on something, they open first, or the
-        # hand would carry it back up the stroke
-        return back_out(
-            "the fingers closed on air" if air else "the fingers closed on something else (%s)" % detail,
-            opened=not empty,
-        )
+        # hand would carry it back up the stroke. The way back goes from where the arm stands (back_out):
+        # from the lift's top, where the lid slipped out on the lift (`lifted`), too
+        if lifted:
+            why = SLIPPED_ON_LIFT
+        else:
+            why = "the fingers closed on air" if air else "the fingers closed on something else (%s)" % detail
+        return back_out(why, opened=not empty)
 
     return _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, 0, room, back_out, miss)
 
@@ -4416,6 +4465,127 @@ def _close_reached(r):
     )
 
 
+def fingers_hold(ok, pos, band):
+    """Whether the fingers still hold the lid, by a query of the knuckle (`ok`
+    False, or `pos` None: not read): in the grip `band`, or not read at all —
+    nothing then says the lid left them. Outside it, the lid slipped out. The
+    one rule at the lift's top (_lift_top) and at the table
+    (_release_and_home)."""
+    return not ok or pos is None or in_band(pos, band)
+
+
+@dataclass
+class FingersRead:
+    """The knuckle at the lift's top (fingers_at_rest): `pos` the reading
+    judged (None: no reading came), `settled` whether it had stopped
+    changing, `closing` (not settled) whether it moved toward shut over the
+    read and by how much (`closing_rad`; None where too few readings came to
+    tell), `reads` how many fresh readings and `s` how long from the first
+    wait to the verdict."""
+
+    pos: float | None
+    settled: bool
+    closing: bool
+    closing_rad: float | None
+    reads: int
+    s: float
+
+
+def fingers_at_rest(ctx):
+    """The knuckle once it has stopped changing (SLIP_CHECK): fresh
+    /joint_states readings, each one a message that came after the one
+    before it, the first after this is called (client.knuckle_after: the
+    arm need not stand still), until LIFT_TOP_STILL_READS in a row stand
+    within GripperWait.SETTLE_TOL of the first of them. Else, LIFT_TOP_READ_S
+    from the first reading (or the stream silent until then), the last
+    reading is judged, `closing` where the later half of all the readings
+    stands more than SETTLE_TOL toward shut of the earlier half (by their
+    means: a flicker by a count is no move, and a slow slide adds up over
+    the read). Told only from LIFT_TOP_STILL_READS readings or more: fewer,
+    the stream fell silent part way, and a count between two or three
+    readings is not a move. No reading within LIFT_TOP_READ_S: `pos` None,
+    the fingers not read; never a value from before the call. Returns a
+    FingersRead."""
+    t0 = time.monotonic()
+    got = ctx.client.knuckle_after(None, LIFT_TOP_READ_S)
+    if got is None:
+        return FingersRead(None, False, False, None, 0, time.monotonic() - t0)
+    reads = [got]
+    ref, n = float(got[0]), 1
+    while n < LIFT_TOP_STILL_READS:
+        left = LIFT_TOP_READ_S - (reads[-1][1] - reads[0][1])
+        got = ctx.client.knuckle_after(reads[-1][1], left) if left > 0.0 else None
+        if got is None:  # the bound reached, or the stream silent until it
+            seen = [float(p) for p, _at in reads]
+            moved = None
+            if len(seen) >= LIFT_TOP_STILL_READS:
+                half = len(seen) // 2
+                moved = sum(seen[-half:]) / half - sum(seen[:half]) / half
+            closing = moved is not None and moved > GripperWait.SETTLE_TOL
+            return FingersRead(seen[-1], False, closing, moved, len(seen), time.monotonic() - t0)
+        reads.append(got)
+        if abs(float(got[0]) - ref) > GripperWait.SETTLE_TOL:
+            ref, n = float(got[0]), 1
+        else:
+            n += 1
+    return FingersRead(float(reads[-1][0]), True, False, None, len(reads), time.monotonic() - t0)
+
+
+def _lift_top(ctx, cfg, runner, attempt):
+    """The fingers read at the lift's top, the lid over the box (SLIP_CHECK):
+    the knuckle once it has stopped changing (fingers_at_rest) judged by
+    fingers_hold; at the bound, a knuckle still closing toward shut has not
+    got the knob, whatever the band says of its last value. Noted 'lift_top'
+    and said on the console. Returns (held, shut, detail): shut, the fingers
+    ran on to full shut with nothing between them (as _close_reached judges a
+    close: they back out shut, where fingers stopped short of it, on the
+    lid's lip say, open first); detail, what a slip says (the close's own
+    words for the knuckle and the band)."""
+    got = fingers_at_rest(ctx)
+    pos = got.pos
+    band = list(cfg.grip_band)
+    held = fingers_hold(pos is not None, pos, cfg.grip_band) and not got.closing
+    runner.note(
+        "lift_top",
+        attempt=attempt,
+        knuckle=None if pos is None else round(pos, 3),
+        band=band,
+        held=held,
+        settled=got.settled,
+        closing=got.closing,
+        closing_mrad=None if got.closing_rad is None else round(1000 * got.closing_rad, 1),
+        reads=got.reads,
+        read_s=round(got.s, 3),
+    )
+    if pos is None:
+        log.info(
+            "[press_demo] LIFT TOP: no fresh knuckle reading came in %.2f s — the fingers cannot be read, taken as "
+            "holding the lid, as at the table" % got.s
+        )
+        return True, False, None
+    unsettled = "" if got.settled else ", still moving after %.2f s" % got.s
+    if held:
+        log.info("[press_demo] LIFT TOP: grip %.3f vs band %s%s — the lid is in the fingers" % (pos, band, unsettled))
+        return True, False, None
+    if got.closing:
+        detail = (
+            SLIPPED_ON_LIFT + ": grip %.3f at its top, still closing toward shut "
+            "(%.1f mrad over the read) after %.2f s" % (pos, 1000 * got.closing_rad, got.s)
+        )
+    else:
+        detail = SLIPPED_ON_LIFT + ": grip %.3f vs band %s at its top%s" % (
+            pos,
+            band,
+            unsettled,
+        )
+    log.info(
+        "[press_demo] LID SLIPPED at the lift's top (%s) — the lid is taken to be on the box: a grip that held "
+        "nothing" % detail
+    )
+    _video(ctx, "LID SLIPPED out of the fingers on the lift: the lid is on the box")
+    return False, pos >= GRIPPER_CMD_CLOSED - GripperWait.AT_TARGET_TOL, detail
+
+
 def grip_knob_circle(color):
     """The knob's circle in the wrist's close-up at the grip (BGR): (u, v,
     r) px — of HoughCircles' within GRIP_SHOT_R_PX, the one centred lowest
@@ -4524,7 +4694,9 @@ def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True, seen=
     from `seen` (the one judged), whether the box was followed, and what
     follows."""
     seen = button if seen is None else seen
-    code = _back_to_look(ctx, cfg, runner, way, "the grip closed on air (%s)" % detail, opened, live)
+    # a slip at the lift's top says so (its detail does); a close on air, that it closed on air
+    missed = detail if detail.startswith(SLIPPED_ON_LIFT) else "the grip closed on air (%s)" % detail
+    code = _back_to_look(ctx, cfg, runner, way, missed, opened, live)
     if code is not None:
         runner.note("reach_regrip", found=None, outcome="the back-out did not fly")
         return None, code
@@ -4558,9 +4730,9 @@ def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True, seen=
             ctx,
             cfg,
             runner,
-            "the grip closed on air (%s) and the wrist now sees the button %.0f "
+            "%s and the wrist now sees the button %.0f "
             "mm from where the box was last seen from the look pose — the box moved; the lid is not "
-            "taken off" % (detail, 1000 * math.hypot(*move)),
+            "taken off" % (missed, 1000 * math.hypot(*move)),
         )
     again = (float(got[0][0]), float(got[0][1]), float(button[2]))
     log.info(
@@ -4569,7 +4741,14 @@ def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True, seen=
         % (again[0], again[1], 1000 * shift, "" if up is None else ", %.1f mm above its lid" % up)
     )
     if followed:
-        follow_box(ctx, move, button, seen, "after the grip closed on air the wrist's re-aim puts")
+        follow_box(
+            ctx,
+            move,
+            button,
+            seen,
+            "after %s the wrist's re-aim puts"
+            % ("the lid slipped out on the lift" if detail.startswith(SLIPPED_ON_LIFT) else "the grip closed on air"),
+        )
     return again, None
 
 
@@ -4718,14 +4897,30 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
     def back_out(why, opened=True):
         return _back_out(ctx, cfg, runner, way, why, opened=opened, live=live())
 
-    def miss(detail, air, empty=False):
+    def miss(detail, air, empty=False, lifted=False):
+        # lifted: the lid slipped out on the lift (_lift_top), the hand at its top: the way back is solved
+        # from there, never from where the way down was planned to end
+        here = lifted or live()
         retry = air and attempt < GRIP_TRIES and yaw is not None
-        runner.note("reach_grip_result", ok=False, detail=detail, attempt=attempt, on_air=air, retry=retry)
+        runner.note(
+            "reach_grip_result",
+            ok=False,
+            detail=detail,
+            attempt=attempt,
+            on_air=air,
+            retry=retry,
+            **({"slipped": True} if lifted else {}),
+        )
         if retry:
             log.info(
-                "[press_demo] GRIP MISSED — %s: the fingers closed on air; %sbacking out to the look pose, aiming "
+                "[press_demo] GRIP MISSED — %s%s; %sbacking out to the look pose, aiming "
                 "at the knob once more and coming down %.0f mm lower"
-                % (detail, "" if empty else "opening them, ", 1000 * GRIP_RETRY_LOWER_M)
+                % (
+                    detail,
+                    "" if lifted else ": the fingers closed on air",
+                    "" if empty else "opening them, ",
+                    1000 * GRIP_RETRY_LOWER_M,
+                )
             )
             _video(
                 ctx,
@@ -4733,7 +4928,7 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
                 % (detail, 1000 * GRIP_RETRY_LOWER_M),
             )
             regrip, code = _regrip(
-                ctx, cfg, runner, eyes, way, button, yaw, detail, opened=not empty, seen=seen, live=live()
+                ctx, cfg, runner, eyes, way, button, yaw, detail, opened=not empty, seen=seen, live=here
             )
             if regrip is None:
                 return code
@@ -4746,15 +4941,26 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
                 regrip,
                 tilt,
                 lower,
-                "%s, %.0f mm lower than the grip that " "closed on air: %.3f" % (how, 1000 * GRIP_RETRY_LOWER_M, lower),
+                "%s, %.0f mm lower than the grip %s: %.3f"
+                % (
+                    how,
+                    1000 * GRIP_RETRY_LOWER_M,
+                    "the lid slipped out of on the lift" if lifted else "that closed on air",
+                    lower,
+                ),
                 yaw=yaw,
                 attempt=attempt + 1,
                 room=room,
             )
         log.info(
-            "[press_demo] GRIP FAILED%s — %s: the fingers closed on air or on something else, so the knob is not "
-            "up or the grip missed it"
-            % (" AGAIN, %.0f mm lower" % (1000 * GRIP_RETRY_LOWER_M) if attempt > 1 else "", detail)
+            "[press_demo] GRIP FAILED%s — %s%s"
+            % (
+                " AGAIN, %.0f mm lower" % (1000 * GRIP_RETRY_LOWER_M) if attempt > 1 else "",
+                detail,
+                ""
+                if lifted
+                else ": the fingers closed on air or on something else, so the knob is not up or the grip missed it",
+            )
         )
         return _back_out(
             ctx,
@@ -4764,27 +4970,34 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
             "the grip failed%s (%s) — the lid is not taken off"
             % (" twice, the second time %.0f mm lower" % (1000 * GRIP_RETRY_LOWER_M) if attempt > 1 else "", detail),
             opened=not empty,
-            live=live(),
+            live=here,
         )
 
     return _close_and_carry(ctx, cfg, runner, eyes, ahead, way.stroke.quat, attempt, room, back_out, miss)
 
 
-def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_out, miss, closed=False):
+def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_out, miss, closed=False, gripped=None):
     """The hand down round the knob, the fingers open, the hand at `quat`:
     the close, judged by the grip band, then the lift, the clear, the carry
-    and the set-down — ONE execution, all planned while the hand came down
-    (`ahead`, grip_ahead's) — and the release and home (_release_and_home);
-    where no carry and home planned ahead, the lift and the clear alone and
-    the spot look there (choose_and_carry). `back_out(why, opened=True)`: the
+    and the set-down, all planned while the hand came down (`ahead`,
+    grip_ahead's) — and the release and home (_release_and_home); where no
+    carry and home planned ahead, the lift and the clear alone and the spot
+    look there (choose_and_carry). With SLIP_CHECK the close and the lift
+    are ONE execution, the fingers are read at the lift's top (_lift_top),
+    and only a lid still in them goes on: the clear and what follows it as
+    ONE execution from there (the set-down's watch on it), or the clear
+    alone, the carry planned while it flies. Off: the close and all of it
+    ONE execution, as before. `back_out(why, opened=True)`: the
     hand's way off the knob, nothing lifted — no lift to fly, or one that
-    did not start; `miss(detail, on_air)`: a close that did not hold. Each
+    did not start; `miss(detail, on_air, empty=False, lifted=False)`: a close that did not hold,
+    or (`lifted`) a lid that slipped out of the fingers on the lift. Each
     returns what this does: the exit code, or its caller's sentinel. A lift
     the runner refuses after the close, the arm standing past its drift gate
     from where the lift was planned from (the close pulled the hand, or the
     way down stopped short of its planned end with no contact felt): once
     more with `closed`, the knob held, the lift planned from where the arm
-    stands, as after a contact."""
+    stands, as after a contact; `gripped`, what the close read, said there
+    once the lift's top reads the lid held (SLIP_CHECK)."""
     world = _full_world(ctx)
     lift, why, placed = ahead if ahead is not None else (None, "the lookahead plan failed", None)
     if lift is None:
@@ -4808,7 +5021,13 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
     # down: the close, then the lid lifted, carried and set down without a
     # stop. A close that fails stops before anything lifts
     one = placed is not None and placed.carry is not None
+    # SLIP_CHECK: the close and the lift fly, and what follows the lift today flies from its top once the
+    # fingers there read the lid still in them (_lift_top)
+    lifting = [*([] if closed else [close]), *lift.legs[:1]]  # (closed: the knob is held already)
     if one:
+        # the set-down's watch rides the execution that holds the touch: the lift's with the switch off, the
+        # clear's from the lift's top with it on
+        rides = [*lift.legs[1:], *placed.carry.legs] if SLIP_CHECK else [*lift.legs, *placed.carry.legs]
         # the runner gates every leg before anything moves: a carry it would refuse is not flown merged with
         # the close and the lift (nothing would close), the lift goes alone and the carry is chosen after it
         gate = runner.refusal(placed.carry.legs)
@@ -4818,12 +5037,11 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
                 "look" % gate
             )
             one = False
-        elif not _one_execution([*lift.legs, *placed.carry.legs]):
-            # the set-down's watch rides the lift's execution: a carry that would fly as another would set
-            # the lid down unwatched
+        elif not _one_execution(rides):
+            # a carry that would fly as another would set the lid down unwatched
             log.info(
-                "[press_demo] the lift and the carry planned ahead would not fly as one execution, which the "
-                "set-down's watch rides: the lift alone, then the spot look"
+                "[press_demo] the %s and the carry planned ahead would not fly as one execution, which the "
+                "set-down's watch rides: the lift alone, then the spot look" % ("clear" if SLIP_CHECK else "lift")
             )
             one = False
     gate = runner.refusal(lift.legs)
@@ -4831,10 +5049,12 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
         return back_out("the lid has no way off the box (%s: %s) — not gripping it" % gate, opened=closed)
     carried = None
     search = None
-    ctx.lid_lifted = lift  # the lid's way back onto the box, for a STOP before the carry (put_lid_back)
+    if not SLIP_CHECK:
+        ctx.lid_lifted = lift  # the lid's way back onto the box, for a STOP before the carry (put_lid_back)
     if one:
         carry, drop = placed.carry, placed.drop
         flying = [close, *lift.legs, *carry.legs]
+        from_top = [*lift.legs[1:], *carry.legs]
         # where this set-down feels no table the lid goes on to another spot, chosen on the map this one was
         search = SpotSearch(
             ctx,
@@ -4870,25 +5090,45 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
             spot=1,  # the run's first spot for the lid (a set-down that feels no table goes on to a second)
         )
         _say_spot(ctx, eyes, (drop, placed.tier, placed.says), placed.refused, placed.tmap, placed.table_z)
-        log.info(
-            "[press_demo] CLOSE, then ONE MOTION: %s — %.0f mm straight up, %.0f mm back toward the arm, to "
-            "[%.2f, %.2f] and down onto the table, %s"
-            % (
-                ", ".join(lg.name for lg in flying[1:]),
-                1000 * _lift_m(ctx, lift),
-                1000 * lift.back_m,
-                drop.xyz[0],
-                drop.xyz[1],
-                _touch_says(carry, search.after_this()),
+        if SLIP_CHECK:
+            log.info(
+                "[press_demo] CLOSE, then the LIFT %.0f mm straight up, the fingers read at its top; then ONE "
+                "MOTION: %s — %.0f mm back toward the arm, to [%.2f, %.2f] and down onto the table, %s"
+                % (
+                    1000 * _lift_m(ctx, lift),
+                    ", ".join(lg.name for lg in from_top),
+                    1000 * lift.back_m,
+                    drop.xyz[0],
+                    drop.xyz[1],
+                    _touch_says(carry, search.after_this()),
+                )
             )
-        )
-        _video(
-            ctx,
-            "CLOSE on the knob, then ONE MOTION: LIFT, CLEAR, CARRY to [%.2f, %.2f] (%s) and SET DOWN, "
-            "let go where it meets the table" % (drop.xyz[0], drop.xyz[1], placed.tier),
-        )
-        watch_setdown(ctx, flying, carry)  # where the lid meets the table, watched
-        res = runner.run(flying, execute=True)
+            _video(
+                ctx,
+                "CLOSE on the knob, LIFT and read the fingers, then ONE MOTION: CLEAR, CARRY to [%.2f, %.2f] (%s) "
+                "and SET DOWN, let go where it meets the table" % (drop.xyz[0], drop.xyz[1], placed.tier),
+            )
+            res = runner.run(lifting, execute=True)
+        else:
+            log.info(
+                "[press_demo] CLOSE, then ONE MOTION: %s — %.0f mm straight up, %.0f mm back toward the arm, to "
+                "[%.2f, %.2f] and down onto the table, %s"
+                % (
+                    ", ".join(lg.name for lg in flying[1:]),
+                    1000 * _lift_m(ctx, lift),
+                    1000 * lift.back_m,
+                    drop.xyz[0],
+                    drop.xyz[1],
+                    _touch_says(carry, search.after_this()),
+                )
+            )
+            _video(
+                ctx,
+                "CLOSE on the knob, then ONE MOTION: LIFT, CLEAR, CARRY to [%.2f, %.2f] (%s) and SET DOWN, "
+                "let go where it meets the table" % (drop.xyz[0], drop.xyz[1], placed.tier),
+            )
+            watch_setdown(ctx, flying, carry)  # where the lid meets the table, watched
+            res = runner.run(flying, execute=True)
     else:
         if placed is not None and placed.carry is None:
             log.info(
@@ -4897,22 +5137,37 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
                 % ("; ".join(placed.refused) or (placed.passed.says() if placed.passed else "no spot the hand reaches"))
             )
         flying = list(lift.legs) if closed else [close, *lift.legs]  # (closed: the knob is held already)
-        log.info(
-            "[press_demo] %sONE MOTION: %s — %.0f mm straight up, then %.0f mm back toward the arm"
-            % (
-                "" if closed else "CLOSE, then ",
-                ", ".join(lg.name for lg in lift.legs),
-                1000 * _lift_m(ctx, lift),
-                1000 * lift.back_m,
-            )
-        )
-        # while the lift and the clear fly, the carry to the scene camera's
-        # best spot from where the clear ends (carry_ahead): flown after the
-        # lift where the spot chosen there is the same
+        from_top = lift.legs[1:]
         then = "" if closed else "CLOSE on the knob, then "
-        _video(ctx, "%sLIFT %.0f mm and CLEAR the box" % (then, 1000 * _lift_m(ctx, lift)))
-        res = runner.run(flying, execute=True, lookahead=lambda end: carry_ahead(ctx, cfg, eyes, end, room=room))
-        carried = _lookahead(runner)
+        if SLIP_CHECK:
+            log.info(
+                "[press_demo] %sthe LIFT %.0f mm straight up, the fingers read at its top; then %s, %.0f mm back "
+                "toward the arm"
+                % (
+                    "" if closed else "CLOSE, then ",
+                    1000 * _lift_m(ctx, lift),
+                    ", ".join(lg.name for lg in from_top),
+                    1000 * lift.back_m,
+                )
+            )
+            _video(ctx, "%sLIFT %.0f mm, read the fingers, CLEAR the box" % (then, 1000 * _lift_m(ctx, lift)))
+            res = runner.run(lifting, execute=True)
+        else:
+            log.info(
+                "[press_demo] %sONE MOTION: %s — %.0f mm straight up, then %.0f mm back toward the arm"
+                % (
+                    "" if closed else "CLOSE, then ",
+                    ", ".join(lg.name for lg in lift.legs),
+                    1000 * _lift_m(ctx, lift),
+                    1000 * lift.back_m,
+                )
+            )
+            # while the lift and the clear fly, the carry to the scene camera's
+            # best spot from where the clear ends (carry_ahead): flown after the
+            # lift where the spot chosen there is the same
+            _video(ctx, "%sLIFT %.0f mm and CLEAR the box" % (then, 1000 * _lift_m(ctx, lift)))
+            res = runner.run(flying, execute=True, lookahead=lambda end: carry_ahead(ctx, cfg, eyes, end, room=room))
+            carried = _lookahead(runner)
     grip = [r for r in res if r.leg_name in ("grip:open", "grip:close")]
     for shot in shots:
         shot.note(
@@ -4925,7 +5180,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
     if not closed and (not grip or not grip[-1].ok or grip[-1].leg_name != "grip:close"):
         detail = grip[-1].detail if grip else res[-1].detail
         return miss(detail, bool(grip) and _on_air(grip[-1], cfg.grip_band), bool(grip) and _close_reached(grip[-1]))
-    if not closed:
+    if not closed and not SLIP_CHECK:
         runner.note("reach_grip_result", ok=True, detail=grip[-1].detail, attempt=attempt)
         log.info("[press_demo] LID GRIPPED — %s" % grip[-1].detail)
     moves = [r for r in res if r.leg_name not in ("grip:open", "grip:close")]
@@ -4938,23 +5193,79 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
                 "[press_demo] the lift does not start where the arm stands after the close (%s): it is planned from "
                 "there, then the spot look" % (last.detail or last.outcome)
             )
-            return _close_and_carry(ctx, cfg, runner, eyes, None, quat, attempt, room, back_out, miss, closed=True)
+            return _close_and_carry(
+                ctx, cfg, runner, eyes, None, quat, attempt, room, back_out, miss, closed=True, gripped=grip[-1].detail
+            )
         if len(moves) <= 1 and not _started(last):
             # nothing moved: the knob in the fingers, the lid still on the canister
             return back_out(
                 "the lift did not start (%s) — the lid is let go where it lies, on the box"
                 % (last.detail or last.outcome)
             )
+        if SLIP_CHECK:
+            # stopped part way up, the fingers never read at a top: the knob was held at the close, and the
+            # record says the lid is in them, as it did with the close and all after it one execution
+            said = gripped if closed else grip[-1].detail
+            runner.note("reach_grip_result", ok=True, detail=said, attempt=attempt)
+            log.info("[press_demo] LID GRIPPED — %s" % said)
         log.info(
             "[press_demo] STOP: the %s stopped during %s (%s) — the arm holds the lid"
             % (
-                "lid's way from the box to the table" if one else "lift",
-                rp._in_flight(flying, last, runner.last_retime),
+                "lid's way from the box to the table" if one and not SLIP_CHECK else "lift",
+                rp._in_flight(lifting if SLIP_CHECK else flying, last, runner.last_retime),
                 last.detail or last.outcome,
             )
         )
         rp.let_go(ctx)
         return 1
+    if SLIP_CHECK:
+        held, shut, detail = _lift_top(ctx, cfg, runner, attempt)
+        if not held:
+            # the lid on the box, not lifted: a grip that held nothing. Nothing after the lift flies, and
+            # ctx.lid_lifted, set only below, says no lid is lifted
+            return miss(detail, True, shut, lifted=True)
+        # said here, not before the lift: a lid that slipped out on it is never recorded gripped
+        said = gripped if closed else grip[-1].detail
+        runner.note("reach_grip_result", ok=True, detail=said, attempt=attempt)
+        log.info("[press_demo] LID GRIPPED — %s" % said)
+        ctx.lid_lifted = lift  # the lid's way back onto the box, for a STOP before the carry (put_lid_back)
+        if one:
+            watch_setdown(ctx, from_top, carry)  # where the lid meets the table, watched
+        # while the clear flies, the carry to the scene camera's best spot from where it ends (carry_ahead):
+        # flown after it where the spot chosen there is the same. Nothing is planned on the one-motion shape's,
+        # whose set-down's watch is polled from its first sample
+        res = runner.run(
+            from_top,
+            execute=True,
+            lookahead=None if one else (lambda end: carry_ahead(ctx, cfg, eyes, end, room=room)),
+        )
+        carried = None if one else _lookahead(runner)
+        last = res[-1]
+        if not all(r.ok for r in res):
+            way = "lid's way to the table" if one else "clear"
+            if len(res) == 1 and not _started(last) and _never_taken(ctx, from_top, last):
+                # refused before anything went out, by the run's own checks or by the driver: the arm stands at
+                # the lift's top, holding the lid over the box, which goes back on it the way it came off
+                return put_lid_back(
+                    ctx,
+                    cfg,
+                    runner,
+                    "the %s from the lift's top was refused before it started (%s)"
+                    % (way, last.detail or last.outcome),
+                )
+            log.info(
+                "[press_demo] STOP: the %s from the lift's top %s during %s (%s) — the arm holds the lid"
+                % (
+                    way,
+                    "stopped" if _started(last) else "did not start",
+                    rp._in_flight(from_top, last, runner.last_retime),
+                    last.detail or last.outcome,
+                )
+            )
+            if _started(last):
+                rp.let_go(ctx)
+            return 1
+        flying = from_top
     if not one:
         return choose_and_carry(ctx, cfg, runner, eyes, ahead=carried)
     if last.flown_traj is not None:
@@ -6080,7 +6391,7 @@ def _fly_carry(ctx, cfg, runner, carry, drop, tier, search):
     if len(res) == 1 and last.flown_traj is not None:
         rp._note_flight(runner, "reach_carry_flight", [lg.name for lg in merge_groups(carry.legs)[0]], last)
     if not all(r.ok for r in res):
-        if len(res) == 1 and not _started(last) and _never_taken(ctx, carry, last):
+        if len(res) == 1 and not _started(last) and _never_taken(ctx, carry.legs, last):
             # refused before anything went out, by the run's own checks or by the driver: the arm
             # stands where the clear left it, holding the lid, which goes back on the box the way
             # it came off
@@ -6104,10 +6415,11 @@ def _fly_carry(ctx, cfg, runner, carry, drop, tier, search):
     return _release_and_home(ctx, cfg, runner, carry, drop, tier, None, None, search=search)
 
 
-def _never_taken(ctx, carry, last):
-    """Whether the carry `last` ended (one execution, no progress) never went to the arm: the run's own
+def _never_taken(ctx, legs, last):
+    """Whether the execution of `legs` (a carry's, or what flies from the lift's top) that ended `last`
+    (one execution, no progress) never went to the arm: the run's own
     checks refused it, or the client gave it up before the driver took it (client.NOT_TAKEN: not sent,
-    or rejected by the driver), the arm standing where the carry starts by the runner's own measure
+    or rejected by the driver), the arm standing where its first leg starts by the runner's own measure
     (driver.start_gap_rad within DRIFT_REPLAN_RAD). A goal the driver took and then lost word of (a stop
     it did not confirm, the watchdog, no result) is not: the arm may be moving."""
     if last.outcome == "refused":
@@ -6117,7 +6429,7 @@ def _never_taken(ctx, carry, last):
 
     if last.outcome != "failed" or not str(last.detail or "").startswith(NOT_TAKEN):
         return False
-    return start_gap_rad(ctx.client.joints(), carry.legs[0].traj) <= DRIFT_REPLAN_RAD
+    return start_gap_rad(ctx.client.joints(), legs[0].traj) <= DRIFT_REPLAN_RAD
 
 
 def _say_spot(ctx, eyes, chosen, refused, tmap, table_z):
@@ -6569,13 +6881,15 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why, search=Non
     watch, none of its stretch fed, a watch that failed: that says nothing
     of this spot, and the next set-down would fly as blind, its touch to
     its planned end with nothing watching for the table). A lid that slipped
-    out on the way (the knuckle outside the grip band): the fingers open,
+    out on the way (the knuckle outside the grip band, fingers_hold; with
+    SLIP_CHECK, after the lift's top, where a slip before it was found:
+    _lift_top — on the clear or the carry): the fingers open,
     the arm goes home, and the run ends STOP — no "the lid met the table" is
     said of it, whatever the watch felt. Returns the exit code: 0 with the
     lid let go on the table and the arm home."""
     world = _full_world(ctx)
     ok_q, pos, _stalled = ctx.client.gripper_cmd(None)  # query only: still on the knob?
-    kept = not ok_q or pos is None or in_band(pos, cfg.grip_band)
+    kept = fingers_hold(ok_q, pos, cfg.grip_band)
     watch = getattr(carry, "contact", None)
     read_rest = getattr(watch, "read_rest", None)
     if read_rest is not None:

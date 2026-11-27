@@ -184,6 +184,8 @@ class FakeClient:
         self.contact_at = [0.45, 0.0, 0.085]  # fingertip TF at a guard trip
         self.primes = []  # the joints each prime_compliant was handed (None: the live ones)
         self.stills = []  # each wait_still: how many executions had gone out by then
+        self.reads = []  # each knuckle_after: how many executions had gone out by then
+        self.read_at = 0.0  # the stamp of the last /joint_states message knuckle_after heard
 
     def joints(self):
         return list(self.live)
@@ -195,6 +197,16 @@ class FakeClient:
     def wait_still(self):
         self.stills.append(len(self.executed))
         return 0.0, False  # standing still at once: nothing settles here
+
+    def knuckle_after(self, after, timeout_s):
+        """The next /joint_states message's knuckle, gripper_cmd(None)'s, a 49 Hz stream's period after
+        `after` (None: after the last heard); one gripper_cmd cannot read: no message came, None."""
+        self.reads.append(len(self.executed))
+        ok, pos, _stalled = self.gripper_cmd(None)
+        if not ok:
+            return None
+        self.read_at = (self.read_at if after is None else float(after)) + 1.0 / 49.0
+        return float(pos), self.read_at
 
     def wrist_efforts(self):
         return [0.0] * 4 if self.efforts else None

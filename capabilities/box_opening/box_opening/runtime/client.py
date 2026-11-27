@@ -256,6 +256,7 @@ class PlannerClient:
         # Overridden to "arm_robotiq_*" on flatbot when joint prefix is detected.
         self._tip_frames = list(FINGERTIP_FRAMES)
         self._gripper_pos = None
+        self._gripper_at = 0.0  # monotonic stamp of the last joint_states message that carried the knuckle
         self._gripper_target = None  # driver setpoint (0..1) re-sent while pending
         self.world_held = None  # path of the world the planner holds
         self.compliant = False  # joint impedance, nothing read stops a leg (execute); a run sets it
@@ -363,6 +364,7 @@ class PlannerClient:
         for name in msg.name:
             if any(h in name for h in _GRIPPER_JOINT_HINTS):
                 self._gripper_pos = float(msg.position[idx[name]])
+                self._gripper_at = self._eff_at
                 break
 
     def motion_enabled(self):
@@ -544,6 +546,32 @@ class PlannerClient:
                     said = "%s at %.3f rad/s at the last reading" % (self.joint_names[j], v[j])
                 log.info("[client] the arm is not still after %.1f s (%s) — carrying on" % (waited, said))
                 return waited, True
+
+    def knuckle_after(self, after, timeout_s):
+        """The knuckle from the first /joint_states message carrying it that
+        arrived after `after` (a stamp this returned; None: one arriving from
+        this call on), waiting up to `timeout_s` for it: (position, its
+        arrival stamp), or None where none came. A new reading is told from
+        an old one by the arrival of the message it came in (a message with
+        the arm's joints and no knuckle is no reading of the fingers); the
+        arm need not stand still. Sends nothing; an abort asked for raises
+        KeyboardInterrupt, as a Ctrl+C here does (no goal is in flight)."""
+        t0 = time.monotonic()
+        since = t0 if after is None else float(after)
+        while True:
+            if self._abort is not None and self._abort.requested:
+                raise KeyboardInterrupt
+            if self._gripper_pos is not None and self._gripper_at > since:
+                return float(self._gripper_pos), self._gripper_at
+            left = float(timeout_s) - (time.monotonic() - t0)
+            if left <= 0.0:
+                return None
+            try:
+                rclpy.spin_once(self.node, timeout_sec=min(left, 0.02))
+            except RuntimeError as e:
+                if self._abort is not None and self._abort.requested:
+                    raise KeyboardInterrupt from e
+                raise
 
     def efforts_present(self):
         self.joints()  # ensure at least one message arrived

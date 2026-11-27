@@ -149,6 +149,9 @@ GRIPPED = re.compile(r"^LID GRIPPED")
 GRIP_MISS = re.compile(r"^the grip straight from the press did not hold the knob \((.*)\)")
 GRIP_BACK = re.compile(r"^the grip straight from the press: (.*?) — back to the look pose")
 GRIP_FAILED = re.compile(r"^GRIP (FAILED|MISSED)")
+# a grip whose lid slipped out at the lift's top (reach_lid_off.SLIPPED_ON_LIFT): the fingers did close on
+# the knob, the lid rose and then left them; never shown as a close on nothing
+SLIPPED_ON_LIFT = "the lid slipped out of the fingers on the lift"
 BAND = re.compile(r"grip %s vs band \[%s, %s\]" % (NUM, NUM, NUM))
 WAY_BACK = re.compile(r"^ONE MOTION from the button back to the look pose")
 AFTER_KNOB = re.compile(r"^AFTER PRESS (\d+): knob (.*)$")
@@ -719,6 +722,8 @@ class FlightView:
             on_air = band is not None and float(band.group(1)) > float(band.group(3))
             if "sanity gate" in m.group(1):
                 why = "a planned move was refused, so the fingers never closed"
+            elif SLIPPED_ON_LIFT in m.group(1):
+                why = SLIPPED_ON_LIFT  # the fingers held the knob; the lid came off it on the way up
             else:
                 why = "fingers closed on nothing" if on_air else "fingers stopped on something that is not the knob"
             self._fail(why, "GRIP")
@@ -730,7 +735,7 @@ class FlightView:
             self._note("going back to look at the knob", "next")
             return
         if GRIP_FAILED.match(s):
-            self._fail("fingers closed on nothing", "GRIP")
+            self._fail(SLIPPED_ON_LIFT if SLIPPED_ON_LIFT in s else "fingers closed on nothing", "GRIP")
             return
         if WAY_BACK.match(s):
             self._begin("CHECK", "going back to look at the knob")

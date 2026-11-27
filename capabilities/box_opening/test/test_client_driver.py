@@ -1606,6 +1606,50 @@ def test_a_ctrl_c_while_the_arm_settles_ends_the_run_as_a_ctrl_c(monkeypatch):
         c.wait_still()
 
 
+def test_the_knuckle_is_read_from_each_fresh_message_the_arm_moving_or_not(monkeypatch):
+    """The fingers at the lift's top are read from /joint_states messages as they come, the knuckle in
+    every one: the first that arrives after the call, then each that arrived after the one before it —
+    while the arm still moves (no wait for it to stand still), one 49 Hz period apart. A stream silent
+    for the timeout gives no reading, never the one heard before; and an abort asked for raises at once."""
+    from box_opening.runtime.abort import AbortFlag
+
+    c, clock = _still_stream(monkeypatch, [0.05] * 5 + [None] * 200)
+    first = c.knuckle_after(None, 1.0)
+    assert first is not None and first[0] == pytest.approx(0.8) and clock["k"] == 1  # the arm moving
+    second = c.knuckle_after(first[1], 1.0)
+    assert second[1] - first[1] == pytest.approx(1 / 49.0) and clock["k"] == 2
+    for _ in range(3):
+        second = c.knuckle_after(second[1], 1.0)
+    t0 = clock["t"]
+    assert c.knuckle_after(second[1], 0.5) is None and clock["t"] - t0 == pytest.approx(0.5, abs=1 / 49.0)
+    assert c.goals_sent() == []
+    c, _clock = _still_stream(monkeypatch, [0.05] * 5)
+    c._abort = AbortFlag()
+    c._abort.requested = True
+    with pytest.raises(KeyboardInterrupt):
+        c.knuckle_after(None, 1.0)
+
+
+def test_a_message_without_the_knuckle_is_no_reading_of_the_fingers(monkeypatch):
+    """A /joint_states message with the arm's joints and no knuckle: the arm's reading is fresh, the
+    fingers' is not. knuckle_after waits for a message that carries the knuckle, never handing back the
+    one heard before under a newer stamp."""
+    c, clock = _still_stream(monkeypatch, [0.0])
+    first = c.knuckle_after(None, 1.0)
+    assert first is not None and first[0] == pytest.approx(0.8)
+
+    def arm_only(node, timeout_sec=0.0):
+        clock["t"] += 1.0 / 49.0
+        m = _reading(clock["k"], 0.0, clock["q2"])
+        m.name, m.position, m.velocity, m.effort = m.name[:7], m.position[:7], m.velocity[:7], m.effort[:7]
+        clock["k"] += 1
+        c._js_cb(m)
+
+    monkeypatch.setattr(client_mod.rclpy, "spin_once", arm_only)
+    assert c.knuckle_after(first[1], 0.2) is None
+    assert c._eff_at > first[1] and c._gripper_at == first[1]  # the arm heard since, the fingers not
+
+
 def test_still_is_the_newest_readings_each_joint_under_the_limit_none_further_apart_than_the_gap():
     """still_for: from the first of the trailing run of readings under the
     limit, by their stamps (a message sent unstamped: when it was heard),

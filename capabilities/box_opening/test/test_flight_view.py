@@ -1248,3 +1248,22 @@ def test_the_person_at_the_e_stop_is_shown_how_far_apart_the_two_cameras_are_and
     assert [ln for ln in out[:3] if "note" in ln] == [
         "             note  scene camera puts it 182 mm away; using the wrist's"
     ]
+
+
+def test_a_lid_that_slipped_out_on_the_lift_is_never_shown_as_fingers_closed_on_nothing():
+    """The fingers read at the lift's top outside the grip band: the person watching has just seen the lid
+    rise 40 mm, and the view says the lid slipped out of the fingers on the lift — never that the fingers
+    closed on nothing — from the look pose (GRIP MISSED, then GRIP FAILED on the last try) and straight
+    from the press."""
+    slip = "the lid slipped out of the fingers on the lift: grip 0.790 vs band [0.3, 0.55] at its top"
+    lifted = (29, P + "CLOSE, then the LIFT 40 mm straight up, the fingers read at its top; then ONE MOTION: x — y")
+    said = (31, P + "LID SLIPPED at the lift's top (%s) — the lid is taken to be on the box" % slip)
+    for line in (
+        P + "GRIP MISSED — %s; backing out to the look pose, aiming at the knob once more" % slip,
+        P + "GRIP FAILED AGAIN, 10 mm lower — %s" % slip,
+        P + "the grip straight from the press did not hold the knob (%s)" % slip,
+    ):
+        out = _view(FOUND + PRESSED + [lifted, said, (31, line)], 1)
+        grip = [ln for ln in out if "GRIP" in ln and "FAIL" in ln]
+        assert grip and "the lid slipped out of the fingers on the lift" in grip[0], (line, out)
+        assert not any("closed on nothing" in ln for ln in out)

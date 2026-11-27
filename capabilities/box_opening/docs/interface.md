@@ -133,8 +133,61 @@ beside the container, and goes home. It has one action, `open_box`:
    ends `box_moved` on its lid; a smaller rise is followed with no rise added
    to the grip), a box that moved before the grip straight from
    the press (no look precedes it), and a box that turned. Not flown.
-1. **Carry:** the lid is lifted, carried and set down beside the container in
-   one motion, at a spot the cameras see is clear. Never inside the
+1. **Lift:** the lid comes 40 mm straight up off the container (35 mm where
+   that does not fly), and the arm stops at the top, the lid still over the
+   container and the hand over the knob, while the fingers are read from
+   fresh `/joint_states` messages as they come (the driver sends the knuckle
+   in each, and one without it is no reading; nothing waits for the arm to
+   stand still): once 8 readings in a row agree within 3 mrad (about 0.16
+   s at 49 Hz), else on the last reading 1 s after the first. In the grip
+   band, or not readable (no fresh reading within that second: as at the
+   table), the lid is in them and the run goes on. Outside it, or still
+   closing toward shut when the second runs out (a lid sliding out drags the
+   fingers shut slowly: the later half of that second's readings more than
+   3 mrad toward shut of the earlier half), the lid slipped out on the
+   lift and is taken to be on the container: nothing is carried, and it is a
+   grip that held nothing, as when the fingers close on air: the hand backs
+   out from where it stands to the look pose (the fingers left shut where
+   they ran to full shut, opened first where they stopped short of it), the
+   wrist aims again and the hand grips once more; straight from the press,
+   back to the look pose and the look decides; after the last try, home,
+   ending `lid_dropped` ("the lid slipped out of the fingers on the lift").
+   The console, the flight view and the `reach_grip_result` row (`slipped`)
+   say the lid slipped out on the lift, never that the fingers closed on
+   nothing. The grip is recorded held (`reach_grip_result`, `LID GRIPPED`)
+   once the lift's top reads the lid in the fingers, or where the lift stops
+   part way (the knob was held at the close). Should the move on from the
+   lift's top not start (refused, or turned down by the driver before it
+   went out), the lid goes back on the container the way it came off, and
+   the run ends `lid_put_back`, recoverable. That includes a refusal by the
+   run's own drift gate (40 mrad from where the clear was planned to start):
+   a free 40 mm lift hangs well under that on its stiff legs (4-8 mm, under
+   20 mrad at any joint), so an arm that far off its top has something
+   holding the lid or the arm, and it is not planned again from there. One
+   that stopped part way, or may have moved without starting, stops the run
+   with the arm holding the lid (`arm_holds`). It does not see a lid that
+   slips later, on the way to its spot (that is still found at the table,
+   below), nor one caught on the container that does not come free (the
+   fingers stay in the band); a lid dropped part way up may sit tilted on
+   the rim, and the aim and the next grip's watched way down decide what
+   happens then. A slide slow enough to read as settled (under about 21
+   mrad/s) is not seen either. Should the stream fall silent after fewer
+   than 8 readings, the last of them is judged by the band alone (`reads` in
+   the `lift_top` row says how many came). On the first attended run, look
+   at the `lift_top` row's `settled` and `read_s`: a knuckle that never
+   settles at the top costs the full second on every run, though no miss;
+   one that never settles and shifts toward shut by more than 3 mrad between
+   the halves of that second is taken for a slip, and a held lid is let go
+   over the container and gripped again. The stop costs about 0.45-0.55
+   s with the spot chosen ahead: the split motion's retiming, 0.24-0.32 s
+   measured offline on 9 of 10 flatbot cases (0.02 s on the tenth); the
+   readings, about 0.16 s at 49 Hz; one more goal sent, a few tens of ms
+   (estimated). With the spot chosen after the lift, the carry is planned
+   while the clear alone flies, and the arm stands about 0.4-0.5 s longer at
+   the clear's end for it (estimated from the carry plan's 1.64 s against
+   the clear's flight): about 0.9-1.0 s there. Not flown.
+1. **Carry:** the lid is carried and set down beside the container in
+   one motion from the lift's top, at a spot the cameras see is clear. Never inside the
    no-land radius: the lid's rim at least 50 mm off the container's (0.155 m
    centre to centre for the pink canister), round both where the press held
    the button and where the cameras put the container. And only on table the
@@ -374,7 +427,7 @@ the run failed:
 ```
 
 (or `8 SET DOWN  FAIL  stopped: the run took too long, the next spot for the lid being chosen`), with the result's `lid: in the hand`.
-A lid that slipped out of the fingers on the way is never `on the table`
+A lid that slipped out of the fingers on the way (after the lift's top, where a slip is a grip that held nothing) is never `on the table`
 either, whatever the set-down felt: `5 CARRY  FAIL  the lid slipped out of the fingers on the way`,
 and the result's `lid: slipped out of the fingers on the way (where it lies is not known)`.
 Everything else the node logs goes to stderr, so:
@@ -549,7 +602,7 @@ still in the fingers, no code is recoverable.
 | `no_button`           | yes         | The container was found and the look from above it found no button on its lid, nor did a look again over a lid the wrist's own frame showed elsewhere (at most two; see "The look again"); nothing was pressed, the arm went home. (The run ends this with exit 2, as it ends a find with no container: until 2026-11-19 the engine read every exit 2 as `not_found`, and this code was never reported)                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `no_press`            | yes         | A stop before the press that names no other code (the container's config has no reach-out press, the fingers did not shut, the knob's height unread): nothing was pressed. A container no press plans to from where the chair stands is not this: the chair is guided (see "Lining up in the middle of a run")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `lid_put_back`        | yes         | No spot for the lid on the table the cameras measured (or no carry to one), or no table felt at the spots it was taken to and no other tried (none left, 6 tried, no time for another, held up at the same height twice, or a set-down that could not be watched): the lid was let go nowhere, it is back on the box and the arm home                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `lid_dropped`         | no          | The arm got home, but the lid slipped out of the fingers on the way                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `lid_dropped`         | no          | The arm got home, but the lid slipped out of the fingers on the way, or on the lift of the last grip it was given                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `arm_holds`           | no          | A motion stopped part of the way: the arm holds there until cleared                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `arm_halted`          | no          | The driver halted a motion (the e-stop) or took control away: the run sent nothing after it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `stopped`             | no          | The run was ended from outside                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
